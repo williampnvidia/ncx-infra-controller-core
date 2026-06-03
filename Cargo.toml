@@ -255,6 +255,7 @@ walkdir = "2.5.0"
 x509-parser = "0.18.1"
 zeroize = { version = "1", features = ["derive"] }
 zip = { version = "8.6", default-features = false }
+jsonpath-rust = "1.0.4"
 
 [profile.release]
 debug = "line-tables-only"
