@@ -644,7 +644,12 @@ impl SiteExplorer {
             }
 
             new_health_report.update_in_alert_since(previous_health_report);
-            if let Some(id) = machine_id {
+            if let Some(id) = machine_id
+                && site_explorer_health_report_needs_update(
+                    previous_health_report,
+                    &new_health_report,
+                )
+            {
                 let mut txn = self.txn_begin().await?;
                 db::machine::update_site_explorer_health_report(
                     txn.as_pgconn(),
@@ -3195,6 +3200,30 @@ fn should_alert_power_state(power_state: PowerState) -> bool {
     )
 }
 
+fn site_explorer_health_report_needs_update(
+    previous_health_report: Option<&health_report::HealthReport>,
+    new_health_report: &health_report::HealthReport,
+) -> bool {
+    match previous_health_report {
+        None => !new_health_report.alerts.is_empty(),
+        Some(_) if new_health_report.alerts.is_empty() => true,
+        Some(previous_health_report) => {
+            !health_reports_equal_ignoring_observed_at(previous_health_report, new_health_report)
+        }
+    }
+}
+
+fn health_reports_equal_ignoring_observed_at(
+    left: &health_report::HealthReport,
+    right: &health_report::HealthReport,
+) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.observed_at = None;
+    right.observed_at = None;
+    left == right
+}
+
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
@@ -3429,5 +3458,68 @@ mod tests {
         assert!(should_alert_power_state(PowerState::Off));
         assert!(should_alert_power_state(PowerState::Paused));
         assert!(should_alert_power_state(PowerState::Unknown));
+    }
+
+    #[test]
+    fn test_site_explorer_health_report_needs_update() {
+        fn empty_report() -> health_report::HealthReport {
+            health_report::HealthReport::empty(
+                health_report::HealthReport::SITE_EXPLORER_SOURCE.to_string(),
+            )
+        }
+
+        fn report_with_alert(
+            message: &str,
+            in_alert_since: Option<chrono::DateTime<chrono::Utc>>,
+        ) -> health_report::HealthReport {
+            let mut report = empty_report();
+            report.alerts.push(health_report::HealthProbeAlert {
+                id: "BmcExplorationFailure".parse().unwrap(),
+                target: Some("192.0.2.10".to_string()),
+                in_alert_since,
+                message: message.to_string(),
+                tenant_message: None,
+                classifications: vec![
+                    health_report::HealthAlertClassification::prevent_allocations(),
+                ],
+            });
+            report
+        }
+
+        let empty = empty_report();
+        assert!(!site_explorer_health_report_needs_update(None, &empty));
+
+        let alert_started_at = chrono::Utc::now();
+        let new_alert = report_with_alert("Endpoint exploration failed", Some(alert_started_at));
+        assert!(site_explorer_health_report_needs_update(None, &new_alert));
+
+        let mut previous_alert = new_alert.clone();
+        previous_alert.observed_at = Some(alert_started_at);
+        let mut same_alert = new_alert.clone();
+        same_alert.observed_at = None;
+        assert!(!site_explorer_health_report_needs_update(
+            Some(&previous_alert),
+            &same_alert,
+        ));
+
+        let mut timestamp_changed = same_alert.clone();
+        timestamp_changed.alerts[0].in_alert_since =
+            Some(alert_started_at + chrono::Duration::seconds(1));
+        assert!(site_explorer_health_report_needs_update(
+            Some(&previous_alert),
+            &timestamp_changed,
+        ));
+
+        let changed_alert =
+            report_with_alert("Endpoint exploration still failed", Some(alert_started_at));
+        assert!(site_explorer_health_report_needs_update(
+            Some(&previous_alert),
+            &changed_alert,
+        ));
+
+        assert!(site_explorer_health_report_needs_update(
+            Some(&previous_alert),
+            &empty,
+        ));
     }
 }
