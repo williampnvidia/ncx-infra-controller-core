@@ -29,6 +29,7 @@ use mac_address::MacAddress;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::hardware_info::HardwareInfo;
 use model::machine::ManagedHostStateSnapshot;
+use model::machine::machine_search_config::MachineSearchConfig;
 use model::site_explorer::{
     Chassis, EndpointExplorationError, EndpointExplorationReport, ExploredEndpoint,
 };
@@ -261,6 +262,85 @@ async fn test_site_explorer_health_report(pool: PgPool) -> Result<(), Box<dyn st
             classifications: vec!["PreventAllocations".to_string()]
         }]
     );
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_site_explorer_machine_audit_state_bulk_lookup_matches_existing_path(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = common::api_fixtures::create_test_env(pool.clone()).await;
+    let (host_machine_id, dpu_machine_id) =
+        common::api_fixtures::create_managed_host(&env).await.into();
+
+    let host_machine = env.find_machine(host_machine_id).await.remove(0);
+    let dpu_machine = env.find_machine(dpu_machine_id).await.remove(0);
+    let host_bmc_ip: IpAddr = host_machine.bmc_info.as_ref().unwrap().ip().parse()?;
+    let dpu_bmc_ip: IpAddr = dpu_machine.bmc_info.as_ref().unwrap().ip().parse()?;
+    let unknown_bmc_ip: IpAddr = "192.0.2.10".parse()?;
+
+    let mut site_explorer_report = health_report::HealthReport::empty(
+        health_report::HealthReport::SITE_EXPLORER_SOURCE.into(),
+    );
+    site_explorer_report
+        .alerts
+        .push(health_report::HealthProbeAlert {
+            id: "BmcExplorationFailure".parse().unwrap(),
+            target: Some(host_bmc_ip.to_string()),
+            in_alert_since: None,
+            message: "Endpoint exploration failed".to_string(),
+            tenant_message: None,
+            classifications: vec![health_report::HealthAlertClassification::prevent_allocations()],
+        });
+
+    let mut txn = db::Transaction::begin(&pool).await?;
+    db::machine::update_site_explorer_health_report(
+        txn.as_pgconn(),
+        &host_machine_id,
+        &site_explorer_report,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let bmc_ips = vec![host_bmc_ip, dpu_bmc_ip, unknown_bmc_ip];
+    let mut existing_path_states = Vec::new();
+    let mut txn = db::Transaction::begin(&pool).await?;
+    for bmc_ip in &bmc_ips {
+        let Some(machine_id) = db::machine::find_id_by_bmc_ip(txn.as_pgconn(), bmc_ip).await?
+        else {
+            continue;
+        };
+        let machine = db::machine::find(
+            &mut txn,
+            db::ObjectFilter::One(machine_id),
+            MachineSearchConfig {
+                include_dpus: true,
+                include_predicted_host: true,
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .next()
+        .unwrap();
+        existing_path_states.push(db::machine::SiteExplorerMachineAuditState {
+            bmc_ip: *bmc_ip,
+            machine_id,
+            site_explorer_health_report: machine.site_explorer_health_report().cloned(),
+        });
+    }
+    txn.commit().await?;
+
+    let mut txn = db::Transaction::begin(&pool).await?;
+    let mut bulk_lookup_states =
+        db::machine::find_site_explorer_machine_audit_states_by_bmc_ips(&mut txn, &bmc_ips).await?;
+    txn.commit().await?;
+
+    existing_path_states.sort_by(|left, right| left.bmc_ip.cmp(&right.bmc_ip));
+    bulk_lookup_states.sort_by(|left, right| left.bmc_ip.cmp(&right.bmc_ip));
+
+    assert_eq!(bulk_lookup_states, existing_path_states);
 
     Ok(())
 }
