@@ -34,7 +34,7 @@ use carbide_uuid::machine::MachineType;
 use carbide_uuid::power_shelf::{PowerShelfIdSource, PowerShelfType};
 use chrono::Utc;
 use config::SiteExplorerConfig;
-use db::{self, DatabaseError, ObjectFilter, Transaction, machine, power_shelf as db_power_shelf};
+use db::{self, DatabaseError, Transaction, machine, power_shelf as db_power_shelf};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryFutureExt};
 use itertools::Itertools;
@@ -486,6 +486,24 @@ impl SiteExplorer {
 
         txn.rollback().await?;
 
+        let bmc_endpoint_addresses = explored_endpoints
+            .iter()
+            .filter(|ep| ep.report.endpoint_type == EndpointType::Bmc)
+            .map(|ep| ep.address)
+            .collect_vec();
+        let mut txn = self.txn_begin().await?;
+        let machine_audit_states = db::machine::find_site_explorer_machine_audit_states_by_bmc_ips(
+            &mut txn,
+            &bmc_endpoint_addresses,
+        )
+        .await?;
+        txn.rollback().await?;
+        let machine_audit_states: HashMap<IpAddr, db::machine::SiteExplorerMachineAuditState> =
+            machine_audit_states
+                .into_iter()
+                .map(|state| (state.bmc_ip, state))
+                .collect();
+
         // Go through all the explored endpoints and collect metrics and submit
         // health reports
         for ep in explored_endpoints.into_iter() {
@@ -495,27 +513,10 @@ impl SiteExplorer {
             }
 
             // We need to find the last health report for the endpoint in order to update it with latest health data
-            let mut txn = self.txn_begin().await?;
-            let machine_id = db::machine::find_id_by_bmc_ip(&mut txn, &ep.address).await?;
-            let machine = match machine_id.as_ref() {
-                Some(id) => db::machine::find(
-                    &mut txn,
-                    ObjectFilter::One(*id),
-                    MachineSearchConfig {
-                        include_dpus: true,
-                        include_predicted_host: true,
-                        ..Default::default()
-                    },
-                )
-                .await?
-                .into_iter()
-                .next(),
-                None => None,
-            };
-
-            let previous_health_report = machine
-                .as_ref()
-                .and_then(|machine| machine.site_explorer_health_report());
+            let machine_audit_state = machine_audit_states.get(&ep.address);
+            let machine_id = machine_audit_state.map(|state| state.machine_id);
+            let previous_health_report =
+                machine_audit_state.and_then(|state| state.site_explorer_health_report.as_ref());
             let mut new_health_report: health_report::HealthReport =
                 health_report::HealthReport::empty(
                     health_report::HealthReport::SITE_EXPLORER_SOURCE.to_string(),
@@ -643,12 +644,16 @@ impl SiteExplorer {
             }
 
             new_health_report.update_in_alert_since(previous_health_report);
-            if let Some(id) = machine_id.as_ref() {
-                db::machine::update_site_explorer_health_report(&mut txn, id, &new_health_report)
-                    .await?;
+            if let Some(id) = machine_id {
+                let mut txn = self.txn_begin().await?;
+                db::machine::update_site_explorer_health_report(
+                    txn.as_pgconn(),
+                    &id,
+                    &new_health_report,
+                )
+                .await?;
+                txn.commit().await?;
             }
-
-            txn.commit().await?;
         }
 
         // Count the total number of explored managed hosts
