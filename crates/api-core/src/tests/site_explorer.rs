@@ -263,6 +263,27 @@ async fn test_site_explorer_health_report(pool: PgPool) -> Result<(), Box<dyn st
         }]
     );
 
+    let stored_site_explorer_report =
+        db::machine::find_one(&pool, &host_machine_id, MachineSearchConfig::default())
+            .await?
+            .unwrap()
+            .site_explorer_health_report()
+            .cloned()
+            .unwrap();
+
+    // A steady-state pass with the same endpoint result should not rewrite the
+    // site-explorer merge report.
+    explorer.run_single_iteration().await.unwrap();
+
+    let next_site_explorer_report =
+        db::machine::find_one(&pool, &host_machine_id, MachineSearchConfig::default())
+            .await?
+            .unwrap()
+            .site_explorer_health_report()
+            .cloned()
+            .unwrap();
+    assert_eq!(next_site_explorer_report, stored_site_explorer_report);
+
     Ok(())
 }
 
