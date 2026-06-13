@@ -281,6 +281,7 @@ pub struct SiteExplorer {
 
 impl SiteExplorer {
     const ITERATION_WORK_KEY: &'static str = "SiteExplorer::run_single_iteration";
+    const SITE_EXPLORER_HEALTH_REPORT_WRITE_BATCH_SIZE: usize = 500;
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -503,6 +504,7 @@ impl SiteExplorer {
                 .into_iter()
                 .map(|state| (state.bmc_ip, state))
                 .collect();
+        let mut pending_health_report_updates = Vec::new();
 
         // Go through all the explored endpoints and collect metrics and submit
         // health reports
@@ -650,15 +652,19 @@ impl SiteExplorer {
                     &new_health_report,
                 )
             {
-                let mut txn = self.txn_begin().await?;
-                db::machine::update_site_explorer_health_report(
-                    txn.as_pgconn(),
-                    &id,
-                    &new_health_report,
-                )
-                .await?;
-                txn.commit().await?;
+                pending_health_report_updates.push((id, new_health_report));
             }
+        }
+
+        for health_report_updates in
+            pending_health_report_updates.chunks(Self::SITE_EXPLORER_HEALTH_REPORT_WRITE_BATCH_SIZE)
+        {
+            let mut txn = self.txn_begin().await?;
+            for (id, health_report) in health_report_updates {
+                db::machine::update_site_explorer_health_report(txn.as_pgconn(), id, health_report)
+                    .await?;
+            }
+            txn.commit().await?;
         }
 
         // Count the total number of explored managed hosts
