@@ -478,6 +478,7 @@ impl SiteExplorer {
         metrics: &mut SiteExplorationMetrics,
         expected_endpoint_index: &ExploredEndpointIndex,
     ) -> SiteExplorerResult<()> {
+        let audit_load_start = Instant::now();
         let mut txn = self.txn_begin().await?;
 
         // Grab them all because we care about everything,
@@ -486,12 +487,14 @@ impl SiteExplorer {
         let explored_managed_hosts = db::explored_managed_host::find_all(txn.as_pgconn()).await?;
 
         txn.rollback().await?;
+        metrics.record_phase_latency("audit_load", audit_load_start.elapsed());
 
         let bmc_endpoint_addresses = explored_endpoints
             .iter()
             .filter(|ep| ep.report.endpoint_type == EndpointType::Bmc)
             .map(|ep| ep.address)
             .collect_vec();
+        let audit_state_load_start = Instant::now();
         let mut txn = self.txn_begin().await?;
         let machine_audit_states = db::machine::find_site_explorer_machine_audit_states_by_bmc_ips(
             &mut txn,
@@ -499,12 +502,14 @@ impl SiteExplorer {
         )
         .await?;
         txn.rollback().await?;
+        metrics.record_phase_latency("audit_state_load", audit_state_load_start.elapsed());
         let machine_audit_states: HashMap<IpAddr, db::machine::SiteExplorerMachineAuditState> =
             machine_audit_states
                 .into_iter()
                 .map(|state| (state.bmc_ip, state))
                 .collect();
         let mut pending_health_report_updates = Vec::new();
+        let audit_compute_start = Instant::now();
 
         // Go through all the explored endpoints and collect metrics and submit
         // health reports
@@ -655,7 +660,9 @@ impl SiteExplorer {
                 pending_health_report_updates.push((id, new_health_report));
             }
         }
+        metrics.record_phase_latency("audit_compute", audit_compute_start.elapsed());
 
+        let audit_write_start = Instant::now();
         for health_report_updates in
             pending_health_report_updates.chunks(Self::SITE_EXPLORER_HEALTH_REPORT_WRITE_BATCH_SIZE)
         {
@@ -666,6 +673,7 @@ impl SiteExplorer {
             }
             txn.commit().await?;
         }
+        metrics.record_phase_latency("audit_write", audit_write_start.elapsed());
 
         // Count the total number of explored managed hosts
         for explored_managed_host in explored_managed_hosts {
@@ -685,7 +693,13 @@ impl SiteExplorer {
         metrics: &mut SiteExplorationMetrics,
     ) -> SiteExplorerResult<SiteIdentifiedHosts> {
         self.check_preconditions(metrics).await?;
+
+        let update_explored_endpoints_start = Instant::now();
         let expected_endpoint_index = self.update_explored_endpoints(metrics).await?;
+        metrics.record_phase_latency(
+            "update_explored_endpoints",
+            update_explored_endpoints_start.elapsed(),
+        );
 
         // Create a list of DPUs and hosts that site explorer should try to ingest. Site explorer uses the following criteria to determine whether
         // to ingest a given endpoint (creating a managed host containing the endpoint and adding it to the state machine):
@@ -694,7 +708,12 @@ impl SiteExplorer {
         // If site explorer is unable to retrieve this mac address, there is no point in creating a managed host: we will not be able to configure the host appropriately.
         // 2b) If the endpoint is for a host: make sure that the host is on and that infinite boot is enabled. Otherwise, we will not be able to provision the DPU appropriately
         // once we create a managed host and add it to the state machine.
+        let identify_machines_to_ingest_start = Instant::now();
         let (explored_dpus, explored_hosts) = self.identify_machines_to_ingest(metrics).await?;
+        metrics.record_phase_latency(
+            "identify_machines_to_ingest",
+            identify_machines_to_ingest_start.elapsed(),
+        );
 
         // Note/TODO:
         // Since we generate the managed-host pair in a different transaction than endpoint discovery,
@@ -702,6 +721,7 @@ impl SiteExplorer {
         // This is improvable
         // However since host information rarely changes (we never reassign MachineInterfaces),
         // this should be ok. The most noticeable effect is that ManagedHost population might be delayed a bit.
+        let identify_managed_hosts_start = Instant::now();
         let mut identified_hosts = self
             .identify_managed_hosts(
                 metrics,
@@ -710,45 +730,70 @@ impl SiteExplorer {
                 explored_hosts,
             )
             .await?;
+        metrics.record_phase_latency(
+            "identify_managed_hosts",
+            identify_managed_hosts_start.elapsed(),
+        );
 
         if self.config.create_machines.load(Ordering::Relaxed) {
-            let start_create_machines = std::time::Instant::now();
+            let start_create_machines = Instant::now();
             let create_machines_res = self
                 .machine_creator
                 .create_machines(metrics, &mut identified_hosts, &expected_endpoint_index)
                 .await;
-            metrics.create_machines_latency = Some(start_create_machines.elapsed());
+            let create_machines_latency = start_create_machines.elapsed();
+            metrics.create_machines_latency = Some(create_machines_latency);
+            metrics.record_phase_latency("create_machines", create_machines_latency);
             create_machines_res?;
         }
 
         // Identify and create power shelves
+        let identify_power_shelves_to_ingest_start = Instant::now();
         let explored_power_shelves = self.identify_power_shelves_to_ingest().await?;
+        metrics.record_phase_latency(
+            "identify_power_shelves_to_ingest",
+            identify_power_shelves_to_ingest_start.elapsed(),
+        );
 
         if self.config.create_power_shelves.load(Ordering::Relaxed) {
-            let start_create_power_shelves = std::time::Instant::now();
+            let start_create_power_shelves = Instant::now();
             let create_power_shelves_res = self
                 .create_power_shelves(metrics, explored_power_shelves, &expected_endpoint_index)
                 .await;
-            metrics.create_power_shelves_latency = Some(start_create_power_shelves.elapsed());
+            let create_power_shelves_latency = start_create_power_shelves.elapsed();
+            metrics.create_power_shelves_latency = Some(create_power_shelves_latency);
+            metrics.record_phase_latency("create_power_shelves", create_power_shelves_latency);
             create_power_shelves_res?;
         }
 
         // Identify and create switches
+        let identify_switches_to_ingest_start = Instant::now();
         let explored_switches = self.identify_switches_to_ingest().await?;
+        metrics.record_phase_latency(
+            "identify_switches_to_ingest",
+            identify_switches_to_ingest_start.elapsed(),
+        );
 
         if self.config.create_switches.load(Ordering::Relaxed) {
-            let start_create_switches = std::time::Instant::now();
+            let start_create_switches = Instant::now();
             let create_switches_res = self
                 .switch_creator
                 .create_switches(metrics, &explored_switches, &expected_endpoint_index)
                 .await;
-            metrics.create_switches_latency = Some(start_create_switches.elapsed());
+            let create_switches_latency = start_create_switches.elapsed();
+            metrics.create_switches_latency = Some(create_switches_latency);
+            metrics.record_phase_latency("create_switches", create_switches_latency);
             create_switches_res?;
         }
 
         // Audit after everything has been explored, identified, and created.
+        let audit_exploration_results_start = Instant::now();
         self.audit_exploration_results(metrics, &expected_endpoint_index)
             .await?;
+        metrics.record_phase_latency(
+            "audit_exploration_results",
+            audit_exploration_results_start.elapsed(),
+        );
 
         // Retained boot interface records that aged out of the configured
         // window are already ignored at read time; sweep them once per pass
