@@ -189,6 +189,10 @@ pub struct FirmwareEntry {
     // If set, we will pass the firmware type to libredfish which for some platforms will install only one part of a multi-firmware package.
     pub install_only_specified: bool,
     pub power_drains_needed: Option<u32>,
+    /// If true, preingestion powers off the host immediately before starting
+    /// this host BMC firmware update.
+    #[serde(default)]
+    pub preingestion_power_off_host_before_update: bool,
     #[serde(default)]
     // this firmware entry is only applicable in preingestion.
     // BF3s are the only machine with multiple firmware entries for a given firmware compoanent type (BMC FWs).
@@ -231,6 +235,7 @@ impl FirmwareEntry {
             mandatory_upgrade_from_priority: None,
             install_only_specified: false,
             power_drains_needed: None,
+            preingestion_power_off_host_before_update: false,
             preingestion_exclusive_config: false,
             pre_update_resets: false,
             script: None,

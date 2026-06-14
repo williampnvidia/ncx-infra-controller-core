@@ -34,6 +34,7 @@ use common::api_fixtures::{
     self, TestEnv, TestManagedHost, create_test_env_with_overrides, get_config,
 };
 use db::{self, DatabaseError};
+use libredfish::SystemPowerControl;
 use model::firmware::{Firmware, FirmwareComponent, FirmwareComponentType, FirmwareEntry};
 use model::instance::status::tenant::TenantState;
 use model::machine::{HostReprovisionState, InstanceState, ManagedHostState};
@@ -369,6 +370,45 @@ async fn insert_endpoint(
         txn,
     )
     .await
+}
+
+fn enable_host_bmc_preingestion_power_off_before_update(config: &mut CarbideConfig) {
+    let bmc_component = config
+        .host_models
+        .get_mut("1")
+        .expect("PowerEdge R750 fixture is missing")
+        .components
+        .get_mut(&FirmwareComponentType::Bmc)
+        .expect("PowerEdge R750 BMC firmware fixture is missing");
+
+    let firmware = bmc_component
+        .known_firmware
+        .iter_mut()
+        .find(|firmware| firmware.version == "6.00.30.00")
+        .expect("PowerEdge R750 target BMC firmware is missing");
+    firmware.preingestion_power_off_host_before_update = true;
+}
+
+fn add_bluefield_bmc_with_preingestion_power_off_before_update(config: &mut CarbideConfig) {
+    let mut firmware = config
+        .host_models
+        .get("1")
+        .expect("PowerEdge R750 fixture is missing")
+        .clone();
+    firmware.model = "BlueField-3 DPU".to_string();
+    let bmc_component = firmware
+        .components
+        .get_mut(&FirmwareComponentType::Bmc)
+        .expect("PowerEdge R750 BMC firmware fixture is missing");
+    let firmware_entry = bmc_component
+        .known_firmware
+        .iter_mut()
+        .find(|firmware| firmware.version == "6.00.30.00")
+        .expect("PowerEdge R750 target BMC firmware is missing");
+    firmware_entry.preingestion_power_off_host_before_update = true;
+    config
+        .host_models
+        .insert("bluefield-power-off-test".to_string(), firmware);
 }
 
 fn build_exploration_report(
@@ -958,6 +998,124 @@ fn test_merge_firmware_configs_write(
     let mut file = dir.clone();
     file.push("metadata.toml");
     fs::write(file, contents)?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_preingestion_host_bmc_power_off_before_update(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    enable_host_bmc_preingestion_power_off_before_update(&mut config);
+    let env =
+        create_test_env_with_overrides(pool.clone(), TestEnvOverrides::with_config(config)).await;
+
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        env.config.preingestion_manager(),
+        env.redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api.work_lock_manager_handle.clone(),
+    );
+
+    let response = env
+        .api
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", "192.0.2.1")
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+
+    let addr = response.address.as_str();
+    let mut txn = pool.begin().await.unwrap();
+    insert_endpoint_version(&mut txn, addr, "4.9", "1.13.2", false).await?;
+    txn.commit().await?;
+
+    let timepoint = env.redfish_sim.timepoint();
+    mgr.run_single_iteration().await?;
+
+    let actions = env.redfish_sim.actions_since(&timepoint).all_hosts();
+    assert!(
+        actions.contains(&RedfishSimAction::Power(SystemPowerControl::ForceOff)),
+        "Expected preingestion to power off host before host BMC firmware update; actions: {actions:?}"
+    );
+
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints =
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    assert_eq!(endpoints.len(), 1);
+    let endpoint = endpoints.first().unwrap();
+    match &endpoint.preingestion_state {
+        PreingestionState::UpgradeFirmwareWait { upgrade_type, .. } => {
+            assert_eq!(*upgrade_type, FirmwareComponentType::Bmc);
+        }
+        _ => {
+            panic!("Bad preingestion state: {endpoint:?}");
+        }
+    }
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_preingestion_bluefield_bmc_power_off_before_update_is_ignored(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    add_bluefield_bmc_with_preingestion_power_off_before_update(&mut config);
+    let env =
+        create_test_env_with_overrides(pool.clone(), TestEnvOverrides::with_config(config)).await;
+
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        env.config.preingestion_manager(),
+        env.redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api.work_lock_manager_handle.clone(),
+    );
+
+    let response = env
+        .api
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", "192.0.2.1")
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+
+    let addr = response.address.as_str();
+    let mut txn = pool.begin().await.unwrap();
+    insert_endpoint(
+        &mut txn,
+        addr,
+        "fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg",
+        "Dell Inc.",
+        "BlueField-3 DPU",
+        "4.9",
+        "1.13.2",
+    )
+    .await?;
+    txn.commit().await?;
+
+    let timepoint = env.redfish_sim.timepoint();
+    mgr.run_single_iteration().await?;
+
+    let actions = env.redfish_sim.actions_since(&timepoint).all_hosts();
+    assert!(
+        !actions.contains(&RedfishSimAction::Power(SystemPowerControl::ForceOff)),
+        "Expected preingestion to keep BlueField/DPU powered before BMC firmware update; actions: {actions:?}"
+    );
 
     Ok(())
 }

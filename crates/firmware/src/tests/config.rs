@@ -121,6 +121,7 @@ preingest_upgrade_when_below = "1.27.260418"
 version = "1.27.260418"
 filename = "/opt/carbide/firmware/lenovo-thinksystem_hs350x_v3-bmc-1.27.260418/lnvgy_fw_BMC_igc602j-1.27_anyos_noarch.ima"
 default = true
+preingestion_power_off_host_before_update = true
 "#;
     let mut config: FirmwareConfig = Default::default();
     config.add_test_override(cfg.to_string());
@@ -131,17 +132,15 @@ default = true
         .unwrap();
 
     assert_eq!(server.vendor, bmc_vendor::BMCVendor::Lenovo);
-    assert_eq!(
-        server
-            .components
-            .get(&FirmwareComponentType::Bmc)
-            .unwrap()
-            .known_firmware
-            .first()
-            .unwrap()
-            .version,
-        "1.27.260418"
-    );
+    let firmware = server
+        .components
+        .get(&FirmwareComponentType::Bmc)
+        .unwrap()
+        .known_firmware
+        .first()
+        .unwrap();
+    assert_eq!(firmware.version, "1.27.260418");
+    assert!(firmware.preingestion_power_off_host_before_update);
     Ok(())
 }
 
@@ -158,6 +157,7 @@ current_version_reported_as = "BMCImage1"
 version = "1.27.260418"
 filename = "/opt/carbide/firmware/lenovo-thinksystem_hs350x_v3-bmc-1.27.260418/lnvgy_fw_BMC_igc602j-1.27_anyos_noarch.ima"
 default = true
+preingestion_power_off_host_before_update = true
 "#;
     let lenovoami_cfg = r#"
 model = "ThinkSystem HS350X V3"

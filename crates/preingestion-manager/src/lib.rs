@@ -45,7 +45,7 @@ use libredfish::{PowerState, Redfish, RedfishError, SystemPowerControl};
 use model::firmware::{Firmware, FirmwareComponentType, FirmwareEntry};
 use model::site_explorer::{
     ExploredEndpoint, InitialBmcResetPhase, InitialResetPhase, NicMode, PowerDrainState,
-    PreingestionState, TimeSyncResetPhase,
+    PreingestionState, TimeSyncResetPhase, is_bluefield_model,
 };
 use opentelemetry::metrics::Meter;
 use sqlx::PgPool;
@@ -677,6 +677,14 @@ impl PreingestionManagerStatic {
 
                     if !repeat && to_install.pre_update_resets {
                         self.pre_update_resets(db, endpoint, None, None).await?;
+                        return Ok((true, false));
+                    }
+
+                    if to_install.preingestion_power_off_host_before_update
+                        && !self
+                            .preingestion_power_off_host_before_update(db, endpoint, fw_type)
+                            .await
+                    {
                         return Ok((true, false));
                     }
 
@@ -1483,10 +1491,26 @@ impl PreingestionManagerStatic {
         redfish_client: &dyn libredfish::Redfish,
         endpoint: &ExploredEndpoint,
     ) -> bool {
+        if !self.execute_power_off(redfish_client, endpoint).await {
+            return false;
+        }
+        if let Err(e) = redfish_client.bmc_reset().await {
+            tracing::warn!("Could not reset BMC on {}: {e}", endpoint.address);
+            return false;
+        }
+        true
+    }
+
+    /// Helper: Power off host and verify that the host is off
+    /// Returns true if successful, false if any step failed
+    async fn execute_power_off(
+        &self,
+        redfish_client: &dyn libredfish::Redfish,
+        endpoint: &ExploredEndpoint,
+    ) -> bool {
         match redfish_client.power(SystemPowerControl::ForceOff).await {
             Ok(()) => {}
             Err(e) if matches!(e, RedfishError::UnnecessaryOperation) => {
-                // ignore because it is already off
                 tracing::debug!("Power off not needed on {}: {e}", endpoint.address);
             }
             Err(e) => {
@@ -1506,11 +1530,57 @@ impl PreingestionManagerStatic {
             tracing::warn!("Host {} did not turn off when requested", endpoint.address);
             return false;
         }
-        if let Err(e) = redfish_client.bmc_reset().await {
-            tracing::warn!("Could not reset BMC on {}: {e}", endpoint.address);
-            return false;
-        }
         true
+    }
+
+    /// Power off the host immediately before starting a host BMC firmware update.
+    /// Returns false when preingestion should retry later.
+    async fn preingestion_power_off_host_before_update(
+        &self,
+        db: &PgPool,
+        endpoint: &ExploredEndpoint,
+        fw_type: FirmwareComponentType,
+    ) -> bool {
+        if !fw_type.is_bmc() {
+            tracing::warn!(
+                "Ignoring preingestion_power_off_host_before_update for non-host-BMC firmware {:?} on {}",
+                fw_type,
+                endpoint.address
+            );
+            return true;
+        }
+
+        if endpoint.report.is_dpu()
+            || endpoint
+                .report
+                .model()
+                .is_some_and(|model| is_bluefield_model(&model))
+        {
+            tracing::warn!(
+                "Ignoring preingestion_power_off_host_before_update for BlueField/DPU endpoint {}; DPU must remain powered for firmware update",
+                endpoint.address
+            );
+            return true;
+        }
+
+        let redfish_client = match self
+            .redfish_client_pool
+            .create_client_for_ingested_host(endpoint.address, db)
+            .await
+        {
+            Ok(redfish_client) => redfish_client,
+            Err(e) => {
+                tracing::warn!("Redfish connection to {} failed: {e}", endpoint.address);
+                return false;
+            }
+        };
+
+        tracing::info!(
+            "Powering off host {} before BMC firmware update",
+            endpoint.address
+        );
+        self.execute_power_off(redfish_client.as_ref(), endpoint)
+            .await
     }
 
     /// Helper: Wait for BMC reset and power on the host
