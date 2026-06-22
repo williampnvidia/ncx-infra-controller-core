@@ -20,7 +20,8 @@
 //! Write a test as a list of labeled cases — each a `scenario`, an `input`, and an
 //! `expect`ed result — then run them all through one operation, written once.
 //! [`check_cases`] does the running and the asserting, [`Outcome`] is what a
-//! fallible operation should produce, and [`Case`] is one row.
+//! fallible operation should produce, and [`Case`] is one row. For concise
+//! grouped tables, use [`scenarios!`] or [`value_scenarios!`].
 //!
 //! # A table of cases
 //!
@@ -50,6 +51,38 @@
 //!     |s| s.parse::<u8>().map_err(|_| format!("bad byte: {s}")),
 //! );
 //! ```
+//!
+//! # Grouped scenarios
+//!
+//! When several rows belong to the same named condition, [`scenarios!`] keeps the
+//! inputs and expected outcomes visible while removing the repeated [`Case`]
+//! fields. Pass the operation under test as a `run =` closure -- the form most
+//! tables use, because the same syntax also takes an inline expression or a row
+//! that destructures several inputs:
+//!
+//! ```
+//! use carbide_test_support::Outcome::*;
+//! use carbide_test_support::scenarios;
+//!
+//! fn parse_byte(input: &str) -> Result<u8, String> {
+//!     input.parse::<u8>().map_err(|_| format!("bad byte: {input}"))
+//! }
+//!
+//! scenarios!(run = |input| parse_byte(input);
+//!     "valid bytes" {
+//!         "0" => Yields(0),
+//!         "42" => Yields(42),
+//!     }
+//!
+//!     "invalid bytes" {
+//!         "999" => FailsWith("bad byte: 999".to_string()),
+//!         "x" => Fails,
+//!     }
+//! );
+//! ```
+//!
+//! For a bare named function, the `fn:` shorthand reads a little cleaner --
+//! `scenarios!(parse_byte: ...)` expands to exactly the same table.
 //!
 //! # A single case
 //!
@@ -123,15 +156,55 @@
 //! );
 //! ```
 //!
+//! The [`value_scenarios!`] macro provides the same grouping for total
+//! operations:
+//!
+//! ```
+//! use carbide_test_support::value_scenarios;
+//!
+//! fn is_even(input: u8) -> bool {
+//!     input % 2 == 0
+//! }
+//!
+//! value_scenarios!(run = |n| is_even(n);
+//!     "parity" {
+//!         2 => true,
+//!         7 => false,
+//!     }
+//! );
+//! ```
+//!
+//! # Several inputs per row
+//!
+//! When a row carries more than one input, keep using the macro: declare a
+//! *local* struct with content-named fields, use it as the row `input`, and
+//! destructure it in the `run =` closure. The struct keeps each row readable; the
+//! closure does the work:
+//!
+//! ```
+//! use carbide_test_support::value_scenarios;
+//!
+//! struct Row {
+//!     left: u8,
+//!     right: u8,
+//! }
+//!
+//! value_scenarios!(run = |Row { left, right }| left.saturating_add(right);
+//!     "saturating add" {
+//!         Row { left: 1, right: 2 } => 3,
+//!         Row { left: 250, right: 10 } => 255,
+//!     }
+//! );
+//! ```
+//!
 //! # What's shared, and what stays a convention
 //!
-//! [`Outcome`] is the one piece worth sharing — every fallible test otherwise
-//! re-invents the same "succeeds / fails / fails-with-a-specific-error" enum. There
-//! is deliberately no macro: that's a last-mile crystallization, not a starting
-//! point. And when a row carries several inputs or expected values, a *local*
-//! `struct Case` with content-named fields plus [`assert_outcome`] reads better
-//! than forcing it through the generic [`Case`] here — so that stays a convention,
-//! not a type.
+//! [`Outcome`] is the one piece worth sharing -- every fallible test otherwise
+//! re-invents the same "succeeds / fails / fails-with-a-specific-error" enum.
+//! [`scenarios!`] and [`value_scenarios!`] are intentionally thin syntax over
+//! [`Case`] and [`Check`]. [`assert_outcome`] is the primitive they are built on;
+//! reach for it directly only when a case needs a fully hand-written body that
+//! neither a macro nor [`Case::check`] can express.
 
 use std::fmt::Debug;
 use std::future::Future;
@@ -275,6 +348,113 @@ where
     }
 }
 
+/// Run grouped fallible table rows through one operation.
+///
+/// Each group label is combined with the row input expression in failure output,
+/// so a failure points at both the broad scenario and the concrete input. This is
+/// equivalent to writing [`Case`] rows and passing them to [`check_cases`].
+///
+/// ```
+/// use carbide_test_support::Outcome::*;
+/// use carbide_test_support::scenarios;
+///
+/// fn checked_double(input: u8) -> Result<u8, &'static str> {
+///     input.checked_mul(2).ok_or("overflow")
+/// }
+///
+/// scenarios!(checked_double:
+///     "doubles" {
+///         2 => Yields(4),
+///     }
+///
+///     "overflow" {
+///         200 => Fails,
+///     }
+/// );
+/// ```
+#[macro_export]
+macro_rules! scenarios {
+    ($run:path: $($scenario:literal { $($input:expr => $expect:expr),+ $(,)? })+ $(,)?) => {
+        $crate::check_cases(
+            [
+                $($(
+                    $crate::Case {
+                        scenario: concat!($scenario, " / ", stringify!($input)),
+                        input: $input,
+                        expect: $expect,
+                    },
+                )+)+
+            ],
+            $run,
+        )
+    };
+    (run = $run:expr; $($scenario:literal { $($input:expr => $expect:expr),+ $(,)? })+ $(,)?) => {
+        $crate::check_cases(
+            [
+                $($(
+                    $crate::Case {
+                        scenario: concat!($scenario, " / ", stringify!($input)),
+                        input: $input,
+                        expect: $expect,
+                    },
+                )+)+
+            ],
+            $run,
+        )
+    };
+}
+
+/// Run grouped total-value table rows through one operation.
+///
+/// This is the total-function counterpart to [`scenarios!`], equivalent to
+/// writing [`Check`] rows and passing them to [`check_values`].
+///
+/// ```
+/// use carbide_test_support::value_scenarios;
+///
+/// fn double(input: u8) -> u8 {
+///     input * 2
+/// }
+///
+/// value_scenarios!(double:
+///     "doubles" {
+///         2 => 4,
+///         9 => 18,
+///     }
+/// );
+/// ```
+#[macro_export]
+macro_rules! value_scenarios {
+    ($run:path: $($scenario:literal { $($input:expr => $expect:expr),+ $(,)? })+ $(,)?) => {
+        $crate::check_values(
+            [
+                $($(
+                    $crate::Check {
+                        scenario: concat!($scenario, " / ", stringify!($input)),
+                        input: $input,
+                        expect: $expect,
+                    },
+                )+)+
+            ],
+            $run,
+        )
+    };
+    (run = $run:expr; $($scenario:literal { $($input:expr => $expect:expr),+ $(,)? })+ $(,)?) => {
+        $crate::check_values(
+            [
+                $($(
+                    $crate::Check {
+                        scenario: concat!($scenario, " / ", stringify!($input)),
+                        input: $input,
+                        expect: $expect,
+                    },
+                )+)+
+            ],
+            $run,
+        )
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::Outcome::*;
@@ -325,6 +505,61 @@ mod tests {
                 },
             ],
             |n| n % 2 == 0,
+        );
+    }
+
+    #[test]
+    fn scenarios_macro_runs_grouped_fallible_rows() {
+        fn checked_double(input: u8) -> Result<u8, &'static str> {
+            input.checked_mul(2).ok_or("overflow")
+        }
+
+        crate::scenarios!(checked_double:
+            "doubles" {
+                2 => Yields(4),
+                21 => Yields(42),
+            }
+
+            "overflow" {
+                200 => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn scenarios_macro_accepts_run_expression() {
+        crate::scenarios!(run = |n| n.checked_add(1).ok_or("overflow");
+            "increments" {
+                1u8 => Yields(2),
+            }
+
+            "overflow" {
+                u8::MAX => FailsWith("overflow"),
+            }
+        );
+    }
+
+    #[test]
+    fn value_scenarios_macro_runs_grouped_total_rows() {
+        fn double(input: u8) -> u8 {
+            input * 2
+        }
+
+        crate::value_scenarios!(double:
+            "doubles" {
+                2 => 4,
+                21 => 42,
+            }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "label / 1")]
+    fn value_scenarios_macro_labels_failures_with_group_and_input() {
+        crate::value_scenarios!(run = |n| n;
+            "label" {
+                1 => 2,
+            }
         );
     }
 

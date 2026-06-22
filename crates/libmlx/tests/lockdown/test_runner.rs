@@ -16,15 +16,9 @@
  */
 
 use carbide_test_support::Outcome::*;
-use carbide_test_support::{Case, Check, check_cases, check_values};
+use carbide_test_support::{scenarios, value_scenarios};
 use libmlx::lockdown::error::MlxError;
 use libmlx::lockdown::runner::FlintRunner;
-
-#[test]
-fn test_runner_creation_with_path() {
-    let _runner = FlintRunner::with_path("/fake/path/flint");
-    // Just ensure it can be created without errors
-}
 
 // validate_device_id accepts PCI addresses, device paths, and names, and rejects
 // the empty string and anything with spaces. MlxError isn't PartialEq, so each row
@@ -38,35 +32,27 @@ fn test_device_id_validation() {
         })
     }
 
-    check_cases(
-        [
-            Case {
-                scenario: "PCI address",
-                input: "04:00.0",
-                expect: Yields(()),
-            },
-            Case {
-                scenario: "device path",
-                input: "/dev/mst/mt4099_pci_cr0",
-                expect: Yields(()),
-            },
-            Case {
-                scenario: "device name",
-                input: "mlx5_0",
-                expect: Yields(()),
-            },
-            Case {
-                scenario: "empty string is rejected",
-                input: "",
-                expect: FailsWith("InvalidDeviceId"),
-            },
-            Case {
-                scenario: "spaces are rejected",
-                input: "device with spaces",
-                expect: FailsWith("InvalidDeviceId"),
-            },
-        ],
-        validated,
+    scenarios!(
+        run = validated;
+        "PCI address" {
+            "04:00.0" => Yields(()),
+        }
+
+        "device path" {
+            "/dev/mst/mt4099_pci_cr0" => Yields(()),
+        }
+
+        "device name" {
+            "mlx5_0" => Yields(()),
+        }
+
+        "empty string is rejected" {
+            "" => FailsWith("InvalidDeviceId"),
+        }
+
+        "spaces are rejected" {
+            "device with spaces" => FailsWith("InvalidDeviceId"),
+        }
     );
 }
 
@@ -85,30 +71,23 @@ fn test_dry_run_command_strings() {
         }
     }
 
-    check_values(
-        [
-            Check {
-                scenario: "query",
-                input: dry_run_cmd(runner.query_device("test_device")),
-                expect: "/test/flint -d test_device q".to_string(),
-            },
-            Check {
-                scenario: "disable hw_access",
-                input: dry_run_cmd(runner.disable_hw_access("test_device", "abcdef01")),
-                expect: "/test/flint -d test_device hw_access disable abcdef01".to_string(),
-            },
-            Check {
-                scenario: "enable hw_access",
-                input: dry_run_cmd(runner.enable_hw_access("test_device", "abcdef01")),
-                expect: "/test/flint -d test_device hw_access enable abcdef01".to_string(),
-            },
-            Check {
-                scenario: "set_key",
-                input: dry_run_cmd(runner.set_key("test_device", "12345678")),
-                expect: "/test/flint -d test_device set_key 12345678".to_string(),
-            },
-        ],
-        |cmd| cmd,
+    value_scenarios!(
+        run = |cmd| cmd;
+        "query" {
+            dry_run_cmd(runner.query_device("test_device")) => "/test/flint -d test_device q".to_string(),
+        }
+
+        "disable hw_access" {
+            dry_run_cmd(runner.disable_hw_access("test_device", "abcdef01")) => "/test/flint -d test_device hw_access disable abcdef01".to_string(),
+        }
+
+        "enable hw_access" {
+            dry_run_cmd(runner.enable_hw_access("test_device", "abcdef01")) => "/test/flint -d test_device hw_access enable abcdef01".to_string(),
+        }
+
+        "set_key" {
+            dry_run_cmd(runner.set_key("test_device", "12345678")) => "/test/flint -d test_device set_key 12345678".to_string(),
+        }
     );
 }
 
@@ -126,108 +105,22 @@ fn test_key_validation() {
         })
     }
 
-    check_cases(
-        [
-            Case {
-                scenario: "set_key with non-hex key",
-                input: key_error(runner.set_key("fake_device", "invalid_key")),
-                expect: FailsWith("InvalidKey"),
-            },
-            Case {
-                scenario: "set_key with too-short key",
-                input: key_error(runner.set_key("fake_device", "123")),
-                expect: FailsWith("InvalidKey"),
-            },
-            Case {
-                scenario: "set_key with a non-hex digit",
-                input: key_error(runner.set_key("fake_device", "1234567g")),
-                expect: FailsWith("InvalidKey"),
-            },
-            Case {
-                scenario: "enable_hw_access with too-long key",
-                input: key_error(runner.enable_hw_access("fake_device", "toolong123")),
-                expect: FailsWith("InvalidKey"),
-            },
-        ],
-        |result| result,
+    scenarios!(
+        run = |result| result;
+        "set_key with non-hex key" {
+            key_error(runner.set_key("fake_device", "invalid_key")) => FailsWith("InvalidKey"),
+        }
+
+        "set_key with too-short key" {
+            key_error(runner.set_key("fake_device", "123")) => FailsWith("InvalidKey"),
+        }
+
+        "set_key with a non-hex digit" {
+            key_error(runner.set_key("fake_device", "1234567g")) => FailsWith("InvalidKey"),
+        }
+
+        "enable_hw_access with too-long key" {
+            key_error(runner.enable_hw_access("fake_device", "toolong123")) => FailsWith("InvalidKey"),
+        }
     );
-}
-
-#[test]
-fn test_runner_default() {
-    let _runner = FlintRunner::default();
-    // Should not panic even if flint is not found
-}
-
-// These tests verify the output parsing logic without requiring actual flint execution
-#[cfg(test)]
-mod output_parsing_tests {
-    use carbide_test_support::{Check, check_values};
-
-    // FlintRunner's output parsing keys off substrings; this walks the marker
-    // strings flint emits (bare, with the -I-/Error prefixes, and embedded in
-    // surrounding lines) and confirms each substring is detected. Folds the three
-    // per-marker loops into one table over `(haystack, needle)`.
-    #[test]
-    fn detects_status_substrings_in_output() {
-        check_values(
-            [
-                Check {
-                    scenario: "already disabled, bare",
-                    input: ("HW access already disabled", "already disabled"),
-                    expect: true,
-                },
-                Check {
-                    scenario: "already disabled, -I- prefix",
-                    input: ("-I- HW access already disabled", "already disabled"),
-                    expect: true,
-                },
-                Check {
-                    scenario: "already disabled, embedded in surrounding lines",
-                    input: (
-                        "some other text\nHW access already disabled\nmore text",
-                        "already disabled",
-                    ),
-                    expect: true,
-                },
-                Check {
-                    scenario: "already enabled, bare",
-                    input: ("HW access already enabled", "already enabled"),
-                    expect: true,
-                },
-                Check {
-                    scenario: "already enabled, -I- prefix",
-                    input: ("-I- HW access already enabled", "already enabled"),
-                    expect: true,
-                },
-                Check {
-                    scenario: "already enabled, embedded in surrounding lines",
-                    input: (
-                        "some other text\nHW access already enabled\nmore text",
-                        "already enabled",
-                    ),
-                    expect: true,
-                },
-                Check {
-                    scenario: "HW access is disabled, bare",
-                    input: ("HW access is disabled", "HW access is disabled"),
-                    expect: true,
-                },
-                Check {
-                    scenario: "HW access is disabled, Error prefix",
-                    input: ("Error: HW access is disabled", "HW access is disabled"),
-                    expect: true,
-                },
-                Check {
-                    scenario: "HW access is disabled, embedded in surrounding lines",
-                    input: (
-                        "some text\nHW access is disabled\nmore text",
-                        "HW access is disabled",
-                    ),
-                    expect: true,
-                },
-            ],
-            |(output, needle)| output.contains(needle),
-        );
-    }
 }

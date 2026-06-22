@@ -25,7 +25,7 @@
 // ValueEnum Parsing - Test string parsing for types deriving claps ValueEnum.
 
 use carbide_test_support::Outcome::*;
-use carbide_test_support::{Case, check_cases};
+use carbide_test_support::scenarios;
 use clap::{CommandFactory, Parser};
 use metadata::args::Args as MachineMetadataCommand;
 use network::args::Args as NetworkCommand;
@@ -57,32 +57,26 @@ fn verify_cmd_structure() {
 // machine/all/dpus/hosts state in each case.
 #[test]
 fn parse_show_variants() {
-    check_cases(
-        [
-            Case {
-                scenario: "no arguments (all machines)",
-                input: &["machine", "show"][..],
-                expect: Yields((false, false, false, false)),
-            },
-            Case {
-                scenario: "--dpus flag",
-                input: &["machine", "show", "--dpus"][..],
-                expect: Yields((false, false, true, false)),
-            },
-            Case {
-                scenario: "--hosts flag",
-                input: &["machine", "show", "--hosts"][..],
-                expect: Yields((false, false, false, true)),
-            },
-        ],
-        |argv| {
+    scenarios!(
+        run = |argv| {
             Cmd::try_parse_from(argv.iter().copied())
                 .map(|cmd| match cmd {
                     Cmd::Show(args) => (args.machine.is_some(), args.all, args.dpus, args.hosts),
                     _ => panic!("expected Show variant"),
                 })
                 .map_err(drop)
-        },
+        };
+        "no arguments (all machines)" {
+            &["machine", "show"][..] => Yields((false, false, false, false)),
+        }
+
+        "--dpus flag" {
+            &["machine", "show", "--dpus"][..] => Yields((false, false, true, false)),
+        }
+
+        "--hosts flag" {
+            &["machine", "show", "--hosts"][..] => Yields((false, false, false, true)),
+        }
     );
 }
 
@@ -121,20 +115,8 @@ fn parse_network_config() {
 // same Show variant; both expose the machine ID.
 #[test]
 fn parse_health_report_show_variants() {
-    check_cases(
-        [
-            Case {
-                scenario: "health-report show",
-                input: &["machine", "health-report", "show", TEST_MACHINE_ID][..],
-                expect: Yields(TEST_MACHINE_ID.to_string()),
-            },
-            Case {
-                scenario: "legacy health-override show alias",
-                input: &["machine", "health-override", "show", TEST_MACHINE_ID][..],
-                expect: Yields(TEST_MACHINE_ID.to_string()),
-            },
-        ],
-        |argv| {
+    scenarios!(
+        run = |argv| {
             Cmd::try_parse_from(argv.iter().copied())
                 .map(|cmd| match cmd {
                     Cmd::HealthReport(HealthReportCommand::Show { machine_id }) => {
@@ -143,7 +125,14 @@ fn parse_health_report_show_variants() {
                     _ => panic!("expected HealthReport Show variant"),
                 })
                 .map_err(drop)
-        },
+        };
+        "health-report show" {
+            &["machine", "health-report", "show", TEST_MACHINE_ID][..] => Yields(TEST_MACHINE_ID.to_string()),
+        }
+
+        "legacy health-override show alias" {
+            &["machine", "health-override", "show", TEST_MACHINE_ID][..] => Yields(TEST_MACHINE_ID.to_string()),
+        }
     );
 }
 
@@ -285,68 +274,89 @@ fn parse_positions() {
 // values correctly convert back into their expected variant,
 // or fail otherwise.
 
-// Each documented HealthReportTemplates string round-trips to its variant, and
-// an unknown string is rejected. The variant itself is not PartialEq, so this
-// folds on a discriminant name rather than the enum value.
+// Each HealthReportTemplates string round-trips to its variant, and an unknown
+// string is rejected. The variant isn't PartialEq, so the closure projects the
+// parsed variant through an EXHAUSTIVE `template_name` (no wildcard arm) and each
+// row's expected is that same projection applied to the variant it names -- the
+// variant, not a hand-copied string, is the source of truth. The exhaustive match
+// also means a newly-added HealthReportTemplates variant fails to compile here
+// rather than silently slipping past, so it has to be given a string and a row.
 #[test]
 fn health_override_templates_value_enum() {
+    use HealthReportTemplates as T;
     use clap::ValueEnum;
 
     fn template_name(t: &HealthReportTemplates) -> &'static str {
         match t {
-            HealthReportTemplates::HostUpdate => "host-update",
-            HealthReportTemplates::InternalMaintenance => "internal-maintenance",
-            HealthReportTemplates::OutForRepair => "out-for-repair",
-            HealthReportTemplates::Degraded => "degraded",
-            HealthReportTemplates::Validation => "validation",
-            HealthReportTemplates::RequestOnlineRepair => "request-online-repair",
-            // Only the documented templates above are exercised here.
-            _ => unreachable!("untested HealthReportTemplates variant"),
+            T::HostUpdate => "host-update",
+            T::InternalMaintenance => "internal-maintenance",
+            T::OutForRepair => "out-for-repair",
+            T::Degraded => "degraded",
+            T::Validation => "validation",
+            T::SuppressExternalAlerting => "suppress-external-alerting",
+            T::MarkHealthy => "mark-healthy",
+            T::StopRebootForAutomaticRecoveryFromStateMachine => {
+                "stop-reboot-for-automatic-recovery-from-state-machine"
+            }
+            T::TenantReportedIssue => "tenant-reported-issue",
+            T::RequestOnlineRepair => "request-online-repair",
+            T::RequestRepair => "request-repair",
         }
     }
 
-    check_cases(
-        [
-            Case {
-                scenario: "host-update",
-                input: "host-update",
-                expect: Yields("host-update"),
-            },
-            Case {
-                scenario: "internal-maintenance",
-                input: "internal-maintenance",
-                expect: Yields("internal-maintenance"),
-            },
-            Case {
-                scenario: "out-for-repair",
-                input: "out-for-repair",
-                expect: Yields("out-for-repair"),
-            },
-            Case {
-                scenario: "degraded",
-                input: "degraded",
-                expect: Yields("degraded"),
-            },
-            Case {
-                scenario: "validation",
-                input: "validation",
-                expect: Yields("validation"),
-            },
-            Case {
-                scenario: "request-online-repair",
-                input: "request-online-repair",
-                expect: Yields("request-online-repair"),
-            },
-            Case {
-                scenario: "invalid string is rejected",
-                input: "invalid",
-                expect: Fails,
-            },
-        ],
-        |s| {
+    scenarios!(
+        run = |s| {
             HealthReportTemplates::from_str(s, false)
                 .map(|t| template_name(&t))
                 .map_err(drop)
-        },
+        };
+        "host-update" {
+            "host-update" => Yields(template_name(&T::HostUpdate)),
+        }
+
+        "internal-maintenance" {
+            "internal-maintenance" => Yields(template_name(&T::InternalMaintenance)),
+        }
+
+        "out-for-repair" {
+            "out-for-repair" => Yields(template_name(&T::OutForRepair)),
+        }
+
+        "degraded" {
+            "degraded" => Yields(template_name(&T::Degraded)),
+        }
+
+        "validation" {
+            "validation" => Yields(template_name(&T::Validation)),
+        }
+
+        "suppress-external-alerting" {
+            "suppress-external-alerting" => Yields(template_name(&T::SuppressExternalAlerting)),
+        }
+
+        "mark-healthy" {
+            "mark-healthy" => Yields(template_name(&T::MarkHealthy)),
+        }
+
+        "stop-reboot-for-automatic-recovery-from-state-machine" {
+            "stop-reboot-for-automatic-recovery-from-state-machine" =>
+                Yields(template_name(&T::StopRebootForAutomaticRecoveryFromStateMachine)),
+        }
+
+        "tenant-reported-issue" {
+            "tenant-reported-issue" => Yields(template_name(&T::TenantReportedIssue)),
+        }
+
+        "request-online-repair" {
+            "request-online-repair" => Yields(template_name(&T::RequestOnlineRepair)),
+        }
+
+        "request-repair" {
+            "request-repair" => Yields(template_name(&T::RequestRepair)),
+        }
+
+        "invalid string is rejected" {
+            "invalid" => Fails,
+        }
     );
 }

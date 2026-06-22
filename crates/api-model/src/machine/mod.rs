@@ -65,6 +65,7 @@ use crate::machine_interface::InterfaceType;
 use crate::machine_interface_address::InterfaceAssociationType;
 use crate::network_segment::NetworkSegmentType;
 use crate::power_manager::PowerOptions;
+use crate::predicted_machine_interface::PredictedMachineInterface;
 use crate::state_history::StateHistoryRecord;
 
 pub mod slas;
@@ -276,8 +277,7 @@ impl From<ManagedHostStateSnapshotError> for sqlx::Error {
 ///
 /// Public because admin boot-interface resolution (api-core) applies the same
 /// selection to a machine's interface rows when targeting a host by BMC
-/// endpoint -- the designation must resolve identically no matter which door
-/// the Redfish action comes through.
+/// endpoint.
 pub fn pick_boot_interface(
     interfaces: &[MachineInterfaceSnapshot],
 ) -> Option<&MachineInterfaceSnapshot> {
@@ -298,18 +298,45 @@ fn pick_boot_interface_mac(
     pick_boot_interface(interfaces).map(|x| x.mac_address)
 }
 
-/// Resolves the boot interface to a fully-populated [`MachineBootInterface`]
-/// (MAC + Redfish interface id) from the picked interface's own row. Split out
-/// like `pick_boot_interface_mac` so it's unit-testable without a full snapshot.
+/// Resolves the boot interface to the picked interface's own
+/// [`MachineBootInterface`]. Split out like `pick_boot_interface_mac` so it's
+/// unit-testable without a full snapshot.
 fn pick_boot_interface_pair(
     interfaces: &[MachineInterfaceSnapshot],
 ) -> Option<MachineBootInterface> {
-    pick_boot_interface(interfaces).and_then(|interface| {
-        MachineBootInterface::from_parts(
-            Some(interface.mac_address),
-            interface.boot_interface_id.clone(),
-        )
-    })
+    pick_boot_interface(interfaces).and_then(MachineInterfaceSnapshot::boot_interface)
+}
+
+/// Pick the predicted interface a host should boot from in the window before
+/// its first DHCP lease creates a real `machine_interfaces` row. Mirrors
+/// `pick_boot_interface`'s precedence, one rung down -- predictions, not rows:
+///
+/// 1. A prediction flagged `primary_interface` wins -- the declared
+///    `ExpectedHostNic.primary`, recorded onto the prediction at minting.
+/// 2. Otherwise the sole non-underlay prediction. With several and none
+///    declared primary the boot NIC is unknowable (e.g. a host whose report
+///    lists SuperNICs alongside the boot NIC), so this returns `None` rather
+///    than guess against whichever NIC happens to sort first.
+///
+/// Public because both the machine-controller and admin boot-interface
+/// resolution apply it for the pre-first-lease window, when the real rows
+/// offer no candidate yet. Callers map the chosen prediction to a boot target
+/// via `PredictedMachineInterface::boot_interface()`.
+pub fn pick_boot_prediction(
+    predictions: &[PredictedMachineInterface],
+) -> Option<&PredictedMachineInterface> {
+    // The declared primary wins, exactly as in `pick_boot_interface`.
+    if let Some(primary) = predictions.iter().find(|p| p.primary_interface) {
+        return Some(primary);
+    }
+    // Otherwise only a sole non-underlay prediction is unambiguous.
+    let mut non_underlay = predictions
+        .iter()
+        .filter(|p| p.expected_network_segment_type != NetworkSegmentType::Underlay);
+    match (non_underlay.next(), non_underlay.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    }
 }
 
 impl ManagedHostStateSnapshot {
@@ -1327,6 +1354,28 @@ pub enum ReprovisionState {
     BufferTime,
     VerifyFirmareVersions,
     WaitingForNetworkConfig,
+    PrepareHostBootRepair,
+    UnlockHostForBootRepair {
+        #[serde(default)]
+        unlock_host_state: UnlockHostState,
+    },
+    CheckHostBootConfig,
+    CheckHostBootConfigAfterHostReboot,
+    ConfigureHostBoot {
+        #[serde(default)]
+        retry_count: u32,
+    },
+    WaitingForHostBiosJob {
+        bios_config_info: BiosConfigInfo,
+    },
+    PollingHostBiosSetup {
+        #[serde(default)]
+        retry_count: u32,
+    },
+    SetHostBootOrder {
+        set_boot_order_info: SetBootOrderInfo,
+    },
+    LockHostAfterBootRepair,
     RebootHostBmc,
     RebootHost,
     NotUnderReprovision,
@@ -1803,7 +1852,9 @@ pub enum UefiSetupState {
 /// `bios_job_id` is `Some` while polling a vendor BIOS job (e.g. Dell). `None` only during
 /// `HandleBiosJobFailure` recovery from stuck PollingBiosSetup; non-Dell hosts reboot in
 /// `configure_host_bios` and never enter job-polling substates.
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+///
+/// Derived ordering is used by enclosing reprovision states to report the least advanced DPU.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub struct BiosConfigInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1814,7 +1865,8 @@ pub struct BiosConfigInfo {
     pub retry_count: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+/// Variant order follows BIOS job progression for derived reprovision-state comparisons.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum BiosConfigState {
     WaitForBiosJobScheduled,
@@ -1827,7 +1879,8 @@ pub enum BiosConfigState {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+/// Derived ordering is used by enclosing reprovision states to report the least advanced DPU.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub struct SetBootOrderInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1838,7 +1891,8 @@ pub struct SetBootOrderInfo {
     pub retry_count: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+/// Variant order follows boot-order job progression for derived reprovision-state comparisons.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum SetBootOrderState {
     SetBootOrder,
@@ -2026,7 +2080,8 @@ pub enum HostPlatformConfigurationState {
     LockHost,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
+/// Variant order follows unlock progression for derived reprovision-state comparisons.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord, Default)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum UnlockHostState {
     #[default]
@@ -2381,6 +2436,13 @@ pub struct MachineInterfaceSnapshot {
 }
 
 impl MachineInterfaceSnapshot {
+    /// This row's [`MachineBootInterface`]: its MAC plus its captured Redfish
+    /// interface id. `None` until site-explorer has recorded the id from an
+    /// exploration report.
+    pub fn boot_interface(&self) -> Option<MachineBootInterface> {
+        MachineBootInterface::for_mac(self.mac_address, self.boot_interface_id.clone())
+    }
+
     pub fn mock_with_mac(mac_address: MacAddress) -> Self {
         Self {
             id: MachineInterfaceId::from(uuid::Uuid::nil()),
@@ -2704,7 +2766,8 @@ impl<'r> FromRow<'r, PgRow> for MachineInterfaceSnapshot {
 
 // TODO: reconcile with site_explorer::PowerState. They are almost
 // identical but here we have Reset enum item.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+/// Variant order is a deterministic tie-breaker inside derived recovery-state comparisons.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PowerState {
     Off,
     On,
@@ -2806,6 +2869,13 @@ pub fn dpf_based_dpu_provisioning_possible(
             "DPF based DPU provisioning is not possible because DPF is not enabled for the host {}.",
             state.host_snapshot.id
         );
+        tracing::warn!(
+            machine_id = %state.host_snapshot.id,
+            removed_in = "v2.1",
+            docs = "https://docs.nvidia.com/infra-controller/documentation/getting-started/installation-options/dpf-setup",
+            "iPXE provisioning strategy (internally) is deprecated; enable DPF management for DPUs to migrate"
+        );
+
         return false;
     }
 
@@ -2824,6 +2894,12 @@ pub fn dpf_based_dpu_provisioning_possible(
             and not all DPUs are being reprovisioned.",
             state.host_snapshot.id
         );
+        tracing::warn!(
+            machine_id = %state.host_snapshot.id,
+            removed_in = "v2.1",
+            docs = "https://docs.nvidia.com/infra-controller/documentation/getting-started/installation-options/dpf-setup",
+            "iPXE provisioning strategy (internally) is deprecated; enable DPF management for DPUs to migrate"
+        );
         return false;
     }
 
@@ -2839,6 +2915,12 @@ pub fn dpf_based_dpu_provisioning_possible(
             "DPF based DPU provisioning is not possible because some DPUs are Bluefield 2 in {}.",
             state.host_snapshot.id
         );
+        tracing::warn!(
+            machine_id = %state.host_snapshot.id,
+            removed_in = "v2.1",
+            docs = "https://docs.nvidia.com/infra-controller/documentation/getting-started/installation-options/dpf-setup",
+            "iPXE provisioning strategy (internally) is deprecated; enable DPF management for DPUs to migrate"
+        );
         return false;
     }
 
@@ -2851,6 +2933,12 @@ pub fn dpf_based_dpu_provisioning_possible(
         tracing::info!(
             "DPF based DPU provisioning is not possible because some DPUs do not support BFB install via Redfish."
         );
+        tracing::warn!(
+            machine_id = %state.host_snapshot.id,
+            removed_in = "v2.1",
+            docs = "https://docs.nvidia.com/infra-controller/documentation/getting-started/installation-options/dpf-setup",
+            "iPXE provisioning strategy (internally) is deprecated; enable DPF management for DPUs to migrate"
+        );
         return false;
     }
 
@@ -2862,7 +2950,7 @@ mod tests {
     use std::str::FromStr;
 
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::{Case, check_cases};
+    use carbide_test_support::scenarios;
 
     use super::*;
 
@@ -2874,30 +2962,25 @@ mod tests {
         let failed_at = chrono::DateTime::parse_from_rfc3339("2023-07-31T11:26:18.261228950+00:00")
             .unwrap()
             .with_timezone(&Utc);
-        check_cases(
-            [
-                Case {
-                    scenario: "no error",
-                    input: r#"{"cause": "noerror", "source": "noerror", "failed_at": "2023-07-31T11:26:18.261228950Z"}"#,
-                    expect: Yields(FailureDetails {
-                        cause: FailureCause::NoError,
-                        failed_at,
-                        source: FailureSource::NoError,
-                    }),
-                },
-                Case {
-                    scenario: "nvme clean failed",
-                    input: r#"{"cause": {"nvmecleanfailed":{"err": "error1"}},  "source": "noerror","failed_at": "2023-07-31T11:26:18.261228950Z"}"#,
-                    expect: Yields(FailureDetails {
-                        cause: FailureCause::NVMECleanFailed {
-                            err: "error1".to_string(),
-                        },
-                        failed_at,
-                        source: FailureSource::NoError,
-                    }),
-                },
-            ],
-            |s| serde_json::from_str::<FailureDetails>(s).map_err(drop),
+        scenarios!(
+            run = |s| serde_json::from_str::<FailureDetails>(s).map_err(drop);
+            "no error" {
+                r#"{"cause": "noerror", "source": "noerror", "failed_at": "2023-07-31T11:26:18.261228950Z"}"# => Yields(FailureDetails {
+                    cause: FailureCause::NoError,
+                    failed_at,
+                    source: FailureSource::NoError,
+                }),
+            }
+
+            "nvme clean failed" {
+                r#"{"cause": {"nvmecleanfailed":{"err": "error1"}},  "source": "noerror","failed_at": "2023-07-31T11:26:18.261228950Z"}"# => Yields(FailureDetails {
+                    cause: FailureCause::NVMECleanFailed {
+                        err: "error1".to_string(),
+                    },
+                    failed_at,
+                    source: FailureSource::NoError,
+                }),
+            }
         );
     }
 
@@ -2909,13 +2992,30 @@ mod tests {
         let machine_id =
             MachineId::from_str("fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng")
                 .unwrap();
-        check_cases(
-            [
-                Case {
-                    scenario: "dpu reprovision firmware upgrade",
-                    input: r#"{"state":"dpureprovision","dpu_states":{"states":{"fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng":"firmwareupgrade"}}}"#,
-                    expect: Yields((
-                        ManagedHostState::DPUReprovision {
+        scenarios!(
+            run = |s| {
+                serde_json::from_str::<ManagedHostState>(s)
+                    .map(|state| (state.clone(), state.to_string()))
+                    .map_err(drop)
+            };
+            "dpu reprovision firmware upgrade" {
+                r#"{"state":"dpureprovision","dpu_states":{"states":{"fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng":"firmwareupgrade"}}}"# => Yields((
+                    ManagedHostState::DPUReprovision {
+                        dpu_states: DpuReprovisionStates {
+                            states: HashMap::from([(
+                                machine_id,
+                                ReprovisionState::FirmwareUpgrade,
+                            )]),
+                        },
+                    },
+                    "Reprovisioning/FirmwareUpgrade".to_string(),
+                )),
+            }
+
+            "assigned dpu reprovision firmware upgrade" {
+                r#"{"state":"assigned","instance_state":{"state":"dpureprovision","dpu_states":{"states":{"fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng":"firmwareupgrade"}}}}"# => Yields((
+                    ManagedHostState::Assigned {
+                        instance_state: InstanceState::DPUReprovision {
                             dpu_states: DpuReprovisionStates {
                                 states: HashMap::from([(
                                     machine_id,
@@ -2923,32 +3023,10 @@ mod tests {
                                 )]),
                             },
                         },
-                        "Reprovisioning/FirmwareUpgrade".to_string(),
-                    )),
-                },
-                Case {
-                    scenario: "assigned dpu reprovision firmware upgrade",
-                    input: r#"{"state":"assigned","instance_state":{"state":"dpureprovision","dpu_states":{"states":{"fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng":"firmwareupgrade"}}}}"#,
-                    expect: Yields((
-                        ManagedHostState::Assigned {
-                            instance_state: InstanceState::DPUReprovision {
-                                dpu_states: DpuReprovisionStates {
-                                    states: HashMap::from([(
-                                        machine_id,
-                                        ReprovisionState::FirmwareUpgrade,
-                                    )]),
-                                },
-                            },
-                        },
-                        "Assigned/Reprovision/FirmwareUpgrade".to_string(),
-                    )),
-                },
-            ],
-            |s| {
-                serde_json::from_str::<ManagedHostState>(s)
-                    .map(|state| (state.clone(), state.to_string()))
-                    .map_err(drop)
-            },
+                    },
+                    "Assigned/Reprovision/FirmwareUpgrade".to_string(),
+                )),
+            }
         );
     }
 
@@ -2956,64 +3034,83 @@ mod tests {
     // variant; the parsed value (PartialEq) is the whole assertion.
     #[test]
     fn test_json_deserialize_managed_host_states() {
-        check_cases(
-            [
-                Case {
-                    scenario: "assigned booting with discovery image, default retry",
-                    input: r#"{"state":"assigned","instance_state":{"state":"bootingwithdiscoveryimage"}}"#,
-                    expect: Yields(ManagedHostState::Assigned {
-                        instance_state: InstanceState::BootingWithDiscoveryImage {
-                            retry: RetryInfo { count: 0 },
-                        },
-                    }),
-                },
-                Case {
-                    scenario: "assigned booting with discovery image, explicit retry",
-                    input: r#"{"state":"assigned","instance_state":{"state":"bootingwithdiscoveryimage", "retry":{"count": 10}}}"#,
-                    expect: Yields(ManagedHostState::Assigned {
-                        instance_state: InstanceState::BootingWithDiscoveryImage {
-                            retry: RetryInfo { count: 10 },
-                        },
-                    }),
-                },
-                Case {
-                    scenario: "host init polling bios setup, default retry",
-                    input: r#"{"state":"hostinit","machine_state":{"state":"pollingbiossetup"}}"#,
-                    expect: Yields(ManagedHostState::HostInit {
-                        machine_state: MachineState::PollingBiosSetup { retry_count: 0 },
-                    }),
-                },
-                Case {
-                    scenario: "host init polling bios setup, explicit retry count",
-                    input: r#"{"state":"hostinit","machine_state":{"state":"pollingbiossetup","retry_count":2}}"#,
-                    expect: Yields(ManagedHostState::HostInit {
-                        machine_state: MachineState::PollingBiosSetup { retry_count: 2 },
-                    }),
-                },
-                Case {
-                    scenario: "assigned host platform configuration polling bios setup (legacy)",
-                    input: r#"{"state":"assigned","instance_state":{"state":"hostplatformconfiguration","platform_config_state":{"state":"pollingbiossetup"}}}"#,
-                    expect: Yields(ManagedHostState::Assigned {
-                        instance_state: InstanceState::HostPlatformConfiguration {
-                            platform_config_state:
-                                HostPlatformConfigurationState::PollingBiosSetup { retry_count: 0 },
-                        },
-                    }),
-                },
-                Case {
-                    scenario: "host init waiting for lockdown",
-                    input: r#"{"state":"hostinit","machine_state":{"state":"waitingforlockdown","lockdown_info":{"state":"setlockdown","mode":"enable"}}}"#,
-                    expect: Yields(ManagedHostState::HostInit {
-                        machine_state: MachineState::WaitingForLockdown {
-                            lockdown_info: LockdownInfo {
-                                state: LockdownState::SetLockdown,
-                                mode: LockdownMode::Enable,
+        let machine_id =
+            MachineId::from_str("fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng")
+                .unwrap();
+
+        scenarios!(
+            run = |s| serde_json::from_str::<ManagedHostState>(s).map_err(drop);
+            "assigned booting with discovery image, default retry" {
+                r#"{"state":"assigned","instance_state":{"state":"bootingwithdiscoveryimage"}}"# => Yields(ManagedHostState::Assigned {
+                    instance_state: InstanceState::BootingWithDiscoveryImage {
+                        retry: RetryInfo { count: 0 },
+                    },
+                }),
+            }
+
+            "assigned booting with discovery image, explicit retry" {
+                r#"{"state":"assigned","instance_state":{"state":"bootingwithdiscoveryimage", "retry":{"count": 10}}}"# => Yields(ManagedHostState::Assigned {
+                    instance_state: InstanceState::BootingWithDiscoveryImage {
+                        retry: RetryInfo { count: 10 },
+                    },
+                }),
+            }
+
+            "dpu reprovision host boot configure state" {
+                r#"{"state":"dpureprovision","dpu_states":{"states":{"fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng":{"configurehostboot":{"retry_count":2}}}}}"# => Yields(ManagedHostState::DPUReprovision {
+                    dpu_states: DpuReprovisionStates {
+                        states: HashMap::from([(
+                            machine_id,
+                            ReprovisionState::ConfigureHostBoot { retry_count: 2 },
+                        )]),
+                    },
+                }),
+            }
+
+            "dpu reprovision host boot unlock default state" {
+                r#"{"state":"dpureprovision","dpu_states":{"states":{"fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng":{"unlockhostforbootrepair":{}}}}}"# => Yields(ManagedHostState::DPUReprovision {
+                    dpu_states: DpuReprovisionStates {
+                        states: HashMap::from([(
+                            machine_id,
+                            ReprovisionState::UnlockHostForBootRepair {
+                                unlock_host_state: UnlockHostState::DisableLockdown,
                             },
+                        )]),
+                    },
+                }),
+            }
+
+            "host init polling bios setup, default retry" {
+                r#"{"state":"hostinit","machine_state":{"state":"pollingbiossetup"}}"# => Yields(ManagedHostState::HostInit {
+                    machine_state: MachineState::PollingBiosSetup { retry_count: 0 },
+                }),
+            }
+
+            "host init polling bios setup, explicit retry count" {
+                r#"{"state":"hostinit","machine_state":{"state":"pollingbiossetup","retry_count":2}}"# => Yields(ManagedHostState::HostInit {
+                    machine_state: MachineState::PollingBiosSetup { retry_count: 2 },
+                }),
+            }
+
+            "assigned host platform configuration polling bios setup (legacy)" {
+                r#"{"state":"assigned","instance_state":{"state":"hostplatformconfiguration","platform_config_state":{"state":"pollingbiossetup"}}}"# => Yields(ManagedHostState::Assigned {
+                    instance_state: InstanceState::HostPlatformConfiguration {
+                        platform_config_state:
+                            HostPlatformConfigurationState::PollingBiosSetup { retry_count: 0 },
+                    },
+                }),
+            }
+
+            "host init waiting for lockdown" {
+                r#"{"state":"hostinit","machine_state":{"state":"waitingforlockdown","lockdown_info":{"state":"setlockdown","mode":"enable"}}}"# => Yields(ManagedHostState::HostInit {
+                    machine_state: MachineState::WaitingForLockdown {
+                        lockdown_info: LockdownInfo {
+                            state: LockdownState::SetLockdown,
+                            mode: LockdownMode::Enable,
                         },
-                    }),
-                },
-            ],
-            |s| serde_json::from_str::<ManagedHostState>(s).map_err(drop),
+                    },
+                }),
+            }
         );
     }
 
@@ -3038,60 +3135,50 @@ mod tests {
     // so both the direct parse and the round-trip are asserted.
     #[test]
     fn test_dpf_state_deserialize_and_roundtrip() {
-        check_cases(
-            [
-                Case {
-                    scenario: "provisioning",
-                    input: r#"{"dpfstate":"provisioning"}"#,
-                    expect: Yields((DpfState::Provisioning, DpfState::Provisioning)),
-                },
-                Case {
-                    scenario: "waiting for ready, no phase detail",
-                    input: r#"{"dpfstate":"waitingforready"}"#,
-                    expect: Yields((
-                        DpfState::WaitingForReady { phase_detail: None },
-                        DpfState::WaitingForReady { phase_detail: None },
-                    )),
-                },
-                Case {
-                    scenario: "waiting for ready, with phase detail",
-                    input: r#"{"dpfstate":"waitingforready","phase_detail":"some-detail"}"#,
-                    expect: Yields((
-                        DpfState::WaitingForReady {
-                            phase_detail: Some("some-detail".to_string()),
-                        },
-                        DpfState::WaitingForReady {
-                            phase_detail: Some("some-detail".to_string()),
-                        },
-                    )),
-                },
-                Case {
-                    scenario: "device ready",
-                    input: r#"{"dpfstate":"deviceready"}"#,
-                    expect: Yields((DpfState::DeviceReady, DpfState::DeviceReady)),
-                },
-                Case {
-                    scenario: "reprovisioning",
-                    input: r#"{"dpfstate":"reprovisioning"}"#,
-                    expect: Yields((DpfState::Reprovisioning, DpfState::Reprovisioning)),
-                },
-                Case {
-                    scenario: "unknown tag falls back to Unknown",
-                    input: r#"{"dpfstate":"somethingold"}"#,
-                    expect: Yields((DpfState::Unknown, DpfState::Unknown)),
-                },
-                Case {
-                    scenario: "bogus tag with extra field falls back to Unknown",
-                    input: r#"{"dpfstate":"bogus","extra":"field"}"#,
-                    expect: Yields((DpfState::Unknown, DpfState::Unknown)),
-                },
-            ],
-            |s| {
+        scenarios!(
+            run = |s| {
                 let parsed: DpfState = serde_json::from_str(s).map_err(drop)?;
                 let serialized = serde_json::to_string(&parsed).map_err(drop)?;
                 let roundtrip: DpfState = serde_json::from_str(&serialized).map_err(drop)?;
                 Ok::<_, ()>((parsed, roundtrip))
-            },
+            };
+            "provisioning" {
+                r#"{"dpfstate":"provisioning"}"# => Yields((DpfState::Provisioning, DpfState::Provisioning)),
+            }
+
+            "waiting for ready, no phase detail" {
+                r#"{"dpfstate":"waitingforready"}"# => Yields((
+                    DpfState::WaitingForReady { phase_detail: None },
+                    DpfState::WaitingForReady { phase_detail: None },
+                )),
+            }
+
+            "waiting for ready, with phase detail" {
+                r#"{"dpfstate":"waitingforready","phase_detail":"some-detail"}"# => Yields((
+                    DpfState::WaitingForReady {
+                        phase_detail: Some("some-detail".to_string()),
+                    },
+                    DpfState::WaitingForReady {
+                        phase_detail: Some("some-detail".to_string()),
+                    },
+                )),
+            }
+
+            "device ready" {
+                r#"{"dpfstate":"deviceready"}"# => Yields((DpfState::DeviceReady, DpfState::DeviceReady)),
+            }
+
+            "reprovisioning" {
+                r#"{"dpfstate":"reprovisioning"}"# => Yields((DpfState::Reprovisioning, DpfState::Reprovisioning)),
+            }
+
+            "unknown tag falls back to Unknown" {
+                r#"{"dpfstate":"somethingold"}"# => Yields((DpfState::Unknown, DpfState::Unknown)),
+            }
+
+            "bogus tag with extra field falls back to Unknown" {
+                r#"{"dpfstate":"bogus","extra":"field"}"# => Yields((DpfState::Unknown, DpfState::Unknown)),
+            }
         );
     }
 
@@ -3397,6 +3484,77 @@ mod tests {
         assert_eq!(pick_boot_interface_pair(&[primary]), None);
     }
 
+    /// Build a mock `PredictedMachineInterface` with the fields
+    /// `pick_boot_prediction` inspects (MAC, primary flag, segment type).
+    fn build_mock_prediction(
+        mac: &str,
+        primary: bool,
+        segment_type: NetworkSegmentType,
+    ) -> PredictedMachineInterface {
+        PredictedMachineInterface {
+            id: uuid::Uuid::nil(),
+            machine_id: MachineId::from_str(
+                "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng",
+            )
+            .unwrap(),
+            mac_address: mac.parse().unwrap(),
+            expected_network_segment_type: segment_type,
+            boot_interface_id: None,
+            primary_interface: primary,
+        }
+    }
+
+    // A declared-primary prediction wins outright, mirroring pick_boot_interface
+    // -- regardless of how many other predictions there are.
+    #[test]
+    fn pick_boot_prediction_returns_the_declared_primary() {
+        let predictions = vec![
+            build_mock_prediction("05:00:00:00:00:01", false, NetworkSegmentType::HostInband),
+            build_mock_prediction("10:00:00:00:00:01", true, NetworkSegmentType::HostInband),
+            build_mock_prediction("20:00:00:00:00:01", false, NetworkSegmentType::HostInband),
+        ];
+        assert_eq!(
+            pick_boot_prediction(&predictions).map(|p| p.mac_address),
+            Some("10:00:00:00:00:01".parse().unwrap())
+        );
+    }
+
+    // With no declared primary, a sole non-underlay prediction is unambiguous.
+    #[test]
+    fn pick_boot_prediction_returns_the_sole_non_underlay_prediction() {
+        let predictions = vec![
+            build_mock_prediction("01:00:00:00:00:01", false, NetworkSegmentType::Underlay),
+            build_mock_prediction("10:00:00:00:00:01", false, NetworkSegmentType::HostInband),
+        ];
+        assert_eq!(
+            pick_boot_prediction(&predictions).map(|p| p.mac_address),
+            Some("10:00:00:00:00:01".parse().unwrap())
+        );
+    }
+
+    // Several non-underlay predictions and none declared primary: the boot NIC
+    // is unknowable, so refuse to guess rather than program boot order against
+    // whichever sorts first (the Gigawatt SuperNIC safety case).
+    #[test]
+    fn pick_boot_prediction_refuses_multiple_non_primary_predictions() {
+        let predictions = vec![
+            build_mock_prediction("10:00:00:00:00:01", false, NetworkSegmentType::HostInband),
+            build_mock_prediction("20:00:00:00:00:01", false, NetworkSegmentType::HostInband),
+        ];
+        assert!(pick_boot_prediction(&predictions).is_none());
+    }
+
+    // Underlay predictions are never a boot candidate on their own.
+    #[test]
+    fn pick_boot_prediction_ignores_underlay_only_predictions() {
+        let predictions = vec![build_mock_prediction(
+            "01:00:00:00:00:01",
+            false,
+            NetworkSegmentType::Underlay,
+        )];
+        assert!(pick_boot_prediction(&predictions).is_none());
+    }
+
     // Check the case  where only the BMC has been discovered so far (which
     // is common during early ingestion). In this case, there's no valid boot MAC
     // yet; callers fall back to the `::NoDpu` handling downstream.
@@ -3423,38 +3581,33 @@ mod tests {
     // the exact serialized form and the round-trip equality are both asserted.
     #[test]
     fn host_profile_serde_round_trip() {
-        check_cases(
-            [
-                Case {
-                    scenario: "lockdown disabled (true)",
-                    input: HostProfile {
-                        disable_lockdown: true,
-                    },
-                    expect: Yields((
-                        r#"{"disable_lockdown":true}"#.to_string(),
-                        HostProfile {
-                            disable_lockdown: true,
-                        },
-                    )),
-                },
-                Case {
-                    scenario: "lockdown enabled (false)",
-                    input: HostProfile {
-                        disable_lockdown: false,
-                    },
-                    expect: Yields((
-                        r#"{"disable_lockdown":false}"#.to_string(),
-                        HostProfile {
-                            disable_lockdown: false,
-                        },
-                    )),
-                },
-            ],
-            |profile| {
+        scenarios!(
+            run = |profile| {
                 let json = serde_json::to_string(&profile).map_err(drop)?;
                 let back: HostProfile = serde_json::from_str(&json).map_err(drop)?;
                 Ok::<_, ()>((json, back))
-            },
+            };
+            "lockdown disabled (true)" {
+                HostProfile {
+                    disable_lockdown: true,
+                } => Yields((
+                    r#"{"disable_lockdown":true}"#.to_string(),
+                    HostProfile {
+                        disable_lockdown: true,
+                    },
+                )),
+            }
+
+            "lockdown enabled (false)" {
+                HostProfile {
+                    disable_lockdown: false,
+                } => Yields((
+                    r#"{"disable_lockdown":false}"#.to_string(),
+                    HostProfile {
+                        disable_lockdown: false,
+                    },
+                )),
+            }
         );
     }
 

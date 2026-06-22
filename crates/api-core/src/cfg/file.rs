@@ -44,6 +44,7 @@ use chrono::Duration;
 use db::host_naming::HostNamingStrategyKind;
 use duration_str::{deserialize_duration, deserialize_duration_chrono};
 use figment::Figment;
+use health_report::HealthAlertClassification;
 use ipnetwork::{IpNetwork, Ipv4Network};
 use itertools::Itertools;
 use libmlx::firmware::config::FirmwareFlasherProfile;
@@ -126,6 +127,10 @@ pub struct CarbideConfig {
     /// network provisioning.
     #[serde(default)]
     pub dhcp_servers: Vec<Ipv4Addr>,
+
+    /// NTP server IP addresses for the site.
+    #[serde(default)]
+    pub ntp_servers: Vec<Ipv4Addr>,
 
     /// Route server IP addresses for L2VPN (Ethernet
     /// Virtual) network support on DPUs.
@@ -384,6 +389,11 @@ pub struct CarbideConfig {
     /// and DPU agent version compliance.
     #[serde(default)]
     pub host_health: HostHealthConfig,
+
+    /// Observability settings shared across all state controllers, e.g.
+    /// opt-in per-object metrics.
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
 
     /// Network infrastructure-provided L3 VNI for FNN VPC Internet
     /// connectivity. Combined with `datacenter_asn` to form
@@ -762,6 +772,17 @@ impl CarbideConfig {
             dpu_enable_secure_boot: self.dpu_config.dpu_enable_secure_boot,
         }
     }
+}
+
+/// Observability settings shared across all state controllers.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ObservabilityConfig {
+    /// Health alert classifications for which an additional per-object metric
+    /// (`carbide_object_unhealthy_by_classification_count`) is emitted,
+    /// labeled with the object's type and id (e.g. `object_type="machine"`,
+    /// `object_id="<machine_id>"`).
+    #[serde(default)]
+    pub per_object_metrics_for_classifications: Vec<HealthAlertClassification>,
 }
 
 /// One external tool link rendered in the admin web UI's "Tools"
@@ -2369,6 +2390,7 @@ mod tests {
     use chrono::Datelike;
     use figment::Figment;
     use figment::providers::{Env, Format, Toml};
+    use health_report::HealthAlertClassification;
     use libmlx::variables::value::MlxValueType;
     use libredfish::model::service_root::RedfishVendor;
     use model::expected_machine::DpuMode;
@@ -2845,6 +2867,10 @@ mod tests {
             config.dhcp_servers,
             vec![Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(5, 6, 7, 8)]
         );
+        assert_eq!(
+            config.ntp_servers,
+            vec![Ipv4Addr::new(10, 20, 30, 40), Ipv4Addr::new(50, 60, 70, 80)]
+        );
         assert_eq!(config.vpc_peering_policy, Some(VpcPeeringPolicy::Exclusive));
         assert_eq!(
             config.vpc_peering_policy_on_existing,
@@ -2957,6 +2983,15 @@ mod tests {
                 prevent_allocations_on_stale_dpu_agent_version: true,
                 prevent_allocations_on_scout_heartbeat_timeout: true,
                 suppress_external_alerting_on_scout_heartbeat_timeout: false,
+            }
+        );
+        assert_eq!(
+            config.observability,
+            ObservabilityConfig {
+                per_object_metrics_for_classifications: vec![
+                    HealthAlertClassification::hardware(),
+                    HealthAlertClassification::prevent_allocations(),
+                ],
             }
         );
         assert_eq!(
@@ -3143,6 +3178,10 @@ mod tests {
 
         assert_eq!(config.rack_profiles.rack_profiles.len(), 2);
         let nvl72 = config.rack_profiles.get("NVL72").unwrap();
+        assert_eq!(
+            nvl72.product_family,
+            Some(model::rack_type::RackProductFamily::Gb200)
+        );
         assert_eq!(nvl72.rack_capabilities.compute.count, 18);
         assert_eq!(
             nvl72.rack_capabilities.compute.name.as_deref(),
@@ -3155,6 +3194,10 @@ mod tests {
         assert_eq!(nvl72.rack_capabilities.switch.count, 9);
         assert_eq!(nvl72.rack_capabilities.power_shelf.count, 8);
         let nvl36 = config.rack_profiles.get("NVL36").unwrap();
+        assert_eq!(
+            nvl36.product_family,
+            Some(model::rack_type::RackProductFamily::Gb200)
+        );
         assert_eq!(nvl36.rack_capabilities.compute.count, 9);
         assert_eq!(nvl36.rack_capabilities.switch.count, 9);
         assert_eq!(nvl36.rack_capabilities.power_shelf.count, 2);
@@ -3284,6 +3327,15 @@ mod tests {
                 prevent_allocations_on_stale_dpu_agent_version: true,
                 prevent_allocations_on_scout_heartbeat_timeout: true,
                 suppress_external_alerting_on_scout_heartbeat_timeout: false,
+            }
+        );
+        assert_eq!(
+            config.observability,
+            ObservabilityConfig {
+                per_object_metrics_for_classifications: vec![
+                    HealthAlertClassification::hardware(),
+                    HealthAlertClassification::prevent_allocations(),
+                ],
             }
         );
         assert_eq!(
@@ -3778,7 +3830,9 @@ firmware_url = "https://firmware.example.com/fw-b.bin"
             &NetworkDefinition {
                 segment_type: NetworkDefinitionSegmentType::Admin,
                 prefix: "172.20.0.0/24".parse().unwrap(),
+                prefix_v6: None,
                 gateway: "172.20.0.1".parse().unwrap(),
+                dhcpv6_link_address: None,
                 mtu: 9000,
                 reserve_first: 5,
                 allocation_strategy: Default::default(),
@@ -3791,7 +3845,9 @@ firmware_url = "https://firmware.example.com/fw-b.bin"
             &NetworkDefinition {
                 segment_type: NetworkDefinitionSegmentType::Underlay,
                 prefix: "172.99.0.0/26".parse().unwrap(),
+                prefix_v6: None,
                 gateway: "172.99.0.1".parse().unwrap(),
+                dhcpv6_link_address: None,
                 mtu: 1500,
                 reserve_first: 5,
                 allocation_strategy: Default::default(),
@@ -3804,7 +3860,9 @@ firmware_url = "https://firmware.example.com/fw-b.bin"
             &NetworkDefinition {
                 segment_type: NetworkDefinitionSegmentType::HostInband,
                 prefix: "10.217.18.192/30".parse().unwrap(),
+                prefix_v6: None,
                 gateway: "10.217.18.193".parse().unwrap(),
+                dhcpv6_link_address: None,
                 mtu: 1500,
                 reserve_first: 1,
                 allocation_strategy: Default::default(),

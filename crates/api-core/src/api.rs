@@ -448,6 +448,13 @@ impl Forge for Api {
         crate::handlers::network_segment::create(self, request).await
     }
 
+    async fn attach_network_segment_to_vpc(
+        &self,
+        request: Request<rpc::AttachNetworkSegmentToVpcRequest>,
+    ) -> Result<Response<rpc::NetworkSegment>, Status> {
+        crate::handlers::network_segment::attach_to_vpc(self, request).await
+    }
+
     async fn delete_network_segment(
         &self,
         request: Request<rpc::NetworkSegmentDeletionRequest>,
@@ -2245,6 +2252,29 @@ impl Forge for Api {
         request: Request<rpc::MachineValidationRunListGetRequest>,
     ) -> Result<Response<rpc::MachineValidationRunList>, Status> {
         crate::handlers::machine_validation::get_machine_validation_runs(self, request).await
+    }
+
+    async fn find_machine_validation_run_item_ids(
+        &self,
+        request: Request<rpc::MachineValidationRunItemSearchFilter>,
+    ) -> Result<Response<rpc::MachineValidationRunItemIdList>, Status> {
+        crate::handlers::machine_validation::find_machine_validation_run_item_ids(self, request)
+            .await
+    }
+
+    async fn find_machine_validation_run_items_by_ids(
+        &self,
+        request: Request<rpc::MachineValidationRunItemsByIdsRequest>,
+    ) -> Result<Response<rpc::MachineValidationRunItemList>, Status> {
+        crate::handlers::machine_validation::find_machine_validation_run_items_by_ids(self, request)
+            .await
+    }
+
+    async fn get_machine_validation_attempt(
+        &self,
+        request: Request<rpc::MachineValidationAttemptGetRequest>,
+    ) -> Result<Response<rpc::MachineValidationAttempt>, Status> {
+        crate::handlers::machine_validation::get_machine_validation_attempt(self, request).await
     }
 
     async fn admin_power_control(

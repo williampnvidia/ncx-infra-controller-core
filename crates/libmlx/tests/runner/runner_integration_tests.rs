@@ -22,7 +22,7 @@ use std::fs;
 use std::time::Duration;
 
 use carbide_test_support::Outcome::*;
-use carbide_test_support::{Case, check_cases};
+use carbide_test_support::scenarios;
 use libmlx::runner::error::MlxRunnerError;
 use libmlx::runner::exec_options::ExecOptions;
 use libmlx::runner::runner::MlxConfigRunner;
@@ -54,59 +54,41 @@ fn set_outcome(assignments: &[(&str, &str)]) -> Result<(), String> {
     })
 }
 
-#[test]
-fn test_runner_temp_file_prefix() {
-    let registry = common::create_test_registry();
-    let mut runner = MlxConfigRunner::new("01:00.0".to_string(), registry);
-
-    // Should not panic when setting temp file prefix
-    runner.set_temp_file_prefix("/custom/tmp");
-}
-
 // Every invalid `set` assignment is rejected before any mlxconfig command runs.
 // The not-found rows pin the offending variable name (it's the contract, and the
 // runner reports the *first* invalid variable); the enum / boolean / array-bounds /
 // preset-range rows just assert rejection.
 #[test]
 fn invalid_set_assignments_are_rejected() {
-    check_cases(
-        [
-            Case {
-                scenario: "unknown variable names itself",
-                input: &[("SRIOV_EN", "true"), ("NONEXISTENT_VAR", "value")][..],
-                expect: FailsWith("NONEXISTENT_VAR".to_string()),
-            },
-            Case {
-                scenario: "first invalid variable wins over later invalid values",
-                input: &[
-                    ("NONEXISTENT_VAR", "value"),   // Variable not found
-                    ("POWER_MODE", "INVALID_MODE"), // Invalid enum value
-                    ("GPIO_ENABLED[100]", "true"),  // Array index out of bounds
-                ][..],
-                expect: FailsWith("NONEXISTENT_VAR".to_string()),
-            },
-            Case {
-                scenario: "enum value outside allowed options (LOW/MEDIUM/HIGH)",
-                input: &[("POWER_MODE", "INVALID_POWER_MODE")][..],
-                expect: Fails,
-            },
-            Case {
-                scenario: "non-boolean value for a boolean variable",
-                input: &[("SRIOV_EN", "maybe")][..],
-                expect: Fails,
-            },
-            Case {
-                scenario: "array index past the registry size of 4",
-                input: &[("GPIO_ENABLED[10]", "true")][..],
-                expect: Fails,
-            },
-            Case {
-                scenario: "preset above the max of 10",
-                input: &[("PERFORMANCE_PRESET", "20")][..],
-                expect: Fails,
-            },
-        ],
-        set_outcome,
+    scenarios!(
+        run = set_outcome;
+        "unknown variable names itself" {
+            &[("SRIOV_EN", "true"), ("NONEXISTENT_VAR", "value")][..] => FailsWith("NONEXISTENT_VAR".to_string()),
+        }
+
+        "first invalid variable wins over later invalid values" {
+            &[
+                ("NONEXISTENT_VAR", "value"),   // Variable not found
+                ("POWER_MODE", "INVALID_MODE"), // Invalid enum value
+                ("GPIO_ENABLED[100]", "true"),  // Array index out of bounds
+            ][..] => FailsWith("NONEXISTENT_VAR".to_string()),
+        }
+
+        "enum value outside allowed options (LOW/MEDIUM/HIGH)" {
+            &[("POWER_MODE", "INVALID_POWER_MODE")][..] => Fails,
+        }
+
+        "non-boolean value for a boolean variable" {
+            &[("SRIOV_EN", "maybe")][..] => Fails,
+        }
+
+        "array index past the registry size of 4" {
+            &[("GPIO_ENABLED[10]", "true")][..] => Fails,
+        }
+
+        "preset above the max of 10" {
+            &[("PERFORMANCE_PRESET", "20")][..] => Fails,
+        }
     );
 }
 
@@ -133,19 +115,6 @@ fn test_empty_assignments() {
     let result = runner.set(empty_assignments);
     // Should succeed (no operations to perform)
     assert!(result.is_ok());
-}
-
-#[test]
-fn test_temp_file_prefix_setting() {
-    let registry = common::create_test_registry();
-    let mut runner = MlxConfigRunner::new("01:00.0".to_string(), registry);
-
-    // Test different temp file prefixes
-    runner.set_temp_file_prefix("/tmp");
-    runner.set_temp_file_prefix("/custom/temp");
-    runner.set_temp_file_prefix("/var/tmp");
-
-    // Should not panic or error
 }
 
 // The smoke tests below can't pin an outcome: without a mockable mlxconfig binary

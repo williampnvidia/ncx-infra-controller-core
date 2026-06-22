@@ -23,6 +23,7 @@ use arc_swap::ArcSwap;
 use carbide_dpa::DpaInfo;
 use carbide_dpa_manager::DpaMonitor;
 use carbide_firmware::FirmwareDownloader;
+use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_ib_fabric::IbFabricMonitor;
 use carbide_ib_fabric::ib::{self, IBFabricManager};
 use carbide_ib_partition_controller::context::IBPartitionStateHandlerServices;
@@ -203,6 +204,14 @@ pub fn parse_carbide_config(
     // Validate that the firmware profile config keys match their inner
     // part_number and psid values. Mismatches are logged as warnings.
     config.validate_supernic_firmware_profiles();
+
+    if let Some(manager_config) = &config.component_manager {
+        component_manager::rms::validate_rms_backend_rack_profiles(
+            manager_config,
+            &config.rack_profiles,
+        )
+        .map_err(|error| eyre::eyre!(error).wrap_err("Invalid configuration"))?;
+    }
 
     model::tenant::validate_trust_domain_allowlist_patterns(
         &config.machine_identity.trust_domain_allowlist,
@@ -519,12 +528,18 @@ pub async fn start_api(
             join_set,
         )?))
     } else {
+        tracing::warn!(
+            removed_in = "v2.1",
+            docs = "https://docs.nvidia.com/infra-controller/documentation/getting-started/installation-options/dpf-setup",
+            "iPXE provisioning strategy (internally) is deprecated; enable DPF management for DPUs to migrate"
+        );
         None
     };
 
     let component_manager = if let Some(cd_config) = &carbide_config.component_manager {
         match component_manager::component_manager::build_component_manager(
             cd_config,
+            carbide_config.rack_profiles.clone(),
             rms_client.clone(),
             switch_system_image_rms_api.clone().map(|client| {
                 client as Arc<dyn component_manager::rms::RmsSwitchSystemImageStatusApi>
@@ -544,8 +559,19 @@ pub async fn start_api(
                 Some(cm)
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to build component managers, component manager RPCs will be unavailable: {e}"
+                // The nv-switch, power-shelf, and compute-tray backends are
+                // currently required fields, so they are initialized all-or-
+                // nothing: if any one backend fails to build (for example,
+                // compute_tray_backend defaults to 'rms' but no RMS client is
+                // configured), the other two are discarded as well and the
+                // entire component manager is left uninitialized. All component
+                // manager RPCs (switch, power-shelf, and compute-tray) will be
+                // unavailable until the [component_manager] config is fixed.
+                // TODO: make the three backends individually optional so a bad
+                // config for one backend does not disable the others.
+                tracing::error!(
+                    "Component manager NOT initialized; failed to build one of the \
+                     nv-switch / power-shelf / compute-tray backends: {e}"
                 );
                 None
             }
@@ -1085,6 +1111,27 @@ async fn initialize_and_start_controllers<'a>(
         .to_string_lossy()
         .to_string();
 
+    // Cross-controller registry feeding the per-object health metrics; shared by
+    // every state controller and registered once.
+    let per_object_metric_hold_time = [
+        &carbide_config.machine_state_controller.controller,
+        &carbide_config.switch_state_controller.controller,
+        &carbide_config.rack_state_controller.controller,
+        &carbide_config.power_shelf_state_controller.controller,
+    ]
+    .into_iter()
+    .map(|controller| controller.metric_hold_time)
+    .max()
+    .unwrap_or_default();
+    let per_object_metrics_registry = PerObjectMetricsRegistry::new(
+        carbide_config
+            .observability
+            .per_object_metrics_for_classifications
+            .clone(),
+        per_object_metric_hold_time.saturating_add(std::time::Duration::from_secs(60)),
+    );
+    per_object_metrics_registry.register(&meter);
+
     // handles need to be stored in a variable
     // If they are assigned to _ then the destructor will be immediately called
     StateController::<MachineStateControllerIO>::builder()
@@ -1098,6 +1145,7 @@ async fn initialize_and_start_controllers<'a>(
                 redfish_client_pool: shared_redfish_pool.clone(),
                 ipmi_tool: ipmi_tool.clone(),
                 site_config: carbide_config.machine_state_handler_site_config().into(),
+                per_object_metrics_registry: per_object_metrics_registry.clone(),
             }
             .into(),
         )
@@ -1262,6 +1310,7 @@ async fn initialize_and_start_controllers<'a>(
                 db_pool: db_pool.clone(),
                 component_manager: component_manager.clone().map(Arc::new),
                 credential_manager: credential_manager.clone(),
+                per_object_metrics_registry: per_object_metrics_registry.clone(),
             }
             .into(),
         )
@@ -1286,6 +1335,7 @@ async fn initialize_and_start_controllers<'a>(
                 .into(),
                 switch_system_image_rms_client,
                 credential_manager: credential_manager.clone(),
+                per_object_metrics_registry: per_object_metrics_registry.clone(),
             }
             .into(),
         )
@@ -1302,6 +1352,7 @@ async fn initialize_and_start_controllers<'a>(
                 db_pool: db_pool.clone(),
                 component_manager: component_manager.clone().map(Arc::new),
                 credential_manager: credential_manager.clone(),
+                per_object_metrics_registry: per_object_metrics_registry.clone(),
             }
             .into(),
         )
@@ -1388,6 +1439,7 @@ async fn initialize_and_start_controllers<'a>(
         Arc::new(carbide_config.get_firmware_config()),
         common_pools.clone(),
         work_lock_manager_handle.clone(),
+        carbide_config.rack_profiles.clone(),
         rms_client.clone(),
         credential_manager.clone(),
     )
@@ -1411,6 +1463,7 @@ async fn initialize_and_start_controllers<'a>(
         Some(upload_limiter),
         Some(api_service.credential_manager.clone()),
         work_lock_manager_handle.clone(),
+        carbide_config.ntp_servers.clone(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -1537,8 +1590,10 @@ mod tests {
         NetworkDefinition {
             segment_type,
             prefix,
+            prefix_v6: None,
             // Test helper placeholder; callers under test do not use this as a routable gateway.
             gateway: prefix.network(),
+            dhcpv6_link_address: None,
             mtu: 0,
             reserve_first: 0,
             allocation_strategy: Default::default(),
@@ -1611,6 +1666,53 @@ mod tests {
             networks: None,
             vpcs: None,
         }
+    }
+
+    #[test]
+    fn parse_rejects_rms_component_manager_missing_vendor() -> eyre::Result<()> {
+        let mut config = tempfile::NamedTempFile::new()?;
+        std::io::Write::write_all(
+            &mut config,
+            br#"
+                database_url = "postgres://test"
+                listen = "[::]:1081"
+                asn = 1
+
+                [component_manager]
+                nv_switch_backend = "rms"
+                power_shelf_backend = "mock"
+                compute_tray_backend = "mock"
+
+                [rack_profiles.NVL72]
+                product_family = "gb200"
+                rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
+
+                [rack_profiles.NVL72.rack_capabilities.compute]
+                name = "GB200"
+                count = 18
+                vendor = "NVIDIA"
+
+                [rack_profiles.NVL72.rack_capabilities.switch]
+                count = 9
+
+                [rack_profiles.NVL72.rack_capabilities.power_shelf]
+                count = 8
+            "#,
+        )?;
+
+        let result = parse_carbide_config(config.path(), None);
+        let Err(error) = result else {
+            panic!("missing RMS vendor should be rejected");
+        };
+
+        let error = format!("{error:?}");
+
+        assert!(
+            error.contains("rack_capabilities.switch.vendor"),
+            "error message should name the missing vendor field: {error}"
+        );
+
+        Ok(())
     }
 
     // neither source declares pools — operator misconfiguration.

@@ -25,7 +25,7 @@
 // Validation Logic    - Test business logic validators on parsed arguments.
 
 use carbide_test_support::Outcome::*;
-use carbide_test_support::{Case, check_cases};
+use carbide_test_support::scenarios;
 use clap::{CommandFactory, Parser};
 
 use super::*;
@@ -234,65 +234,57 @@ fn parse_erase() {
 // argument, one half of a paired credential, or a flag left without its value.
 #[test]
 fn invalid_invocations_are_rejected() {
-    check_cases(
-        [
-            Case {
-                scenario: "add without its required arguments",
-                input: &["expected-machine", "add"][..],
-                expect: Fails,
-            },
-            Case {
-                scenario: "patch with a username but no password",
-                input: &[
-                    "expected-machine",
-                    "patch",
-                    "--bmc-mac-address",
-                    "00:00:00:00:00:00",
-                    "--bmc-username",
-                    "admin",
-                ][..],
-                expect: Fails,
-            },
-            Case {
-                scenario: "patch with a password but no username",
-                input: &[
-                    "expected-machine",
-                    "patch",
-                    "--bmc-mac-address",
-                    "00:00:00:00:00:00",
-                    "--bmc-password",
-                    "secret",
-                ][..],
-                expect: Fails,
-            },
-            Case {
-                scenario: "update without --filename",
-                input: &["expected-machine", "update"][..],
-                expect: Fails,
-            },
-            Case {
-                scenario: "add with --fallback-dpu-serial-number missing its value",
-                input: &[
-                    "expected-machine",
-                    "add",
-                    "--bmc-mac-address",
-                    "0a:0b:0c:0d:0e:0f",
-                    "--bmc-username",
-                    "admin",
-                    "--bmc-password",
-                    "secret",
-                    "--chassis-serial-number",
-                    "SN12345",
-                    "--fallback-dpu-serial-number",
-                ][..],
-                expect: Fails,
-            },
-        ],
-        |argv| {
+    scenarios!(
+        run = |argv| {
             Cmd::try_parse_from(argv.iter().copied())
                 .map(|_| ())
                 .map_err(drop)
-        },
+        };
+        "add without its required arguments" {
+            &["expected-machine", "add"][..] => Fails,
+        }
+
+        "patch with a username but no password" {
+            &[
+                "expected-machine",
+                "patch",
+                "--bmc-mac-address",
+                "00:00:00:00:00:00",
+                "--bmc-username",
+                "admin",
+            ][..] => Fails,
+        }
+
+        "patch with a password but no username" {
+            &[
+                "expected-machine",
+                "patch",
+                "--bmc-mac-address",
+                "00:00:00:00:00:00",
+                "--bmc-password",
+                "secret",
+            ][..] => Fails,
+        }
+
+        "update without --filename" {
+            &["expected-machine", "update"][..] => Fails,
+        }
+
+        "add with --fallback-dpu-serial-number missing its value" {
+            &[
+                "expected-machine",
+                "add",
+                "--bmc-mac-address",
+                "0a:0b:0c:0d:0e:0f",
+                "--bmc-username",
+                "admin",
+                "--bmc-password",
+                "secret",
+                "--chassis-serial-number",
+                "SN12345",
+                "--fallback-dpu-serial-number",
+            ][..] => Fails,
+        }
     );
 }
 
@@ -306,73 +298,67 @@ fn invalid_invocations_are_rejected() {
 // add: unique serials and the no-serials case are clean, a repeat is caught.
 #[test]
 fn has_duplicate_dpu_serials_flags_repeats() {
-    check_cases(
-        [
-            Case {
-                scenario: "three unique serials",
-                input: &[
-                    "ExpectedMachine",
-                    "--bmc-mac-address",
-                    "0a:0b:0c:0d:0e:0f",
-                    "--bmc-username",
-                    "admin",
-                    "--bmc-password",
-                    "secret",
-                    "--chassis-serial-number",
-                    "SN12345",
-                    "--fallback-dpu-serial-number",
-                    "dpu1",
-                    "-d",
-                    "dpu2",
-                    "-d",
-                    "dpu3",
-                ][..],
-                expect: Yields(false),
-            },
-            Case {
-                scenario: "a repeated serial is detected",
-                input: &[
-                    "ExpectedMachine",
-                    "--bmc-mac-address",
-                    "0a:0b:0c:0d:0e:0f",
-                    "--bmc-username",
-                    "admin",
-                    "--bmc-password",
-                    "secret",
-                    "--chassis-serial-number",
-                    "SN12345",
-                    "-d",
-                    "dpu1",
-                    "-d",
-                    "dpu2",
-                    "-d",
-                    "dpu3",
-                    "-d",
-                    "dpu1",
-                ][..],
-                expect: Yields(true),
-            },
-            Case {
-                scenario: "no serials at all",
-                input: &[
-                    "ExpectedMachine",
-                    "--bmc-mac-address",
-                    "0a:0b:0c:0d:0e:0f",
-                    "--bmc-username",
-                    "admin",
-                    "--bmc-password",
-                    "secret",
-                    "--chassis-serial-number",
-                    "SN12345",
-                ][..],
-                expect: Yields(false),
-            },
-        ],
-        |argv| {
+    scenarios!(
+        run = |argv| {
             add::Args::try_parse_from(argv.iter().copied())
                 .map(|m| m.has_duplicate_dpu_serials())
                 .map_err(drop)
-        },
+        };
+        "three unique serials" {
+            &[
+                "ExpectedMachine",
+                "--bmc-mac-address",
+                "0a:0b:0c:0d:0e:0f",
+                "--bmc-username",
+                "admin",
+                "--bmc-password",
+                "secret",
+                "--chassis-serial-number",
+                "SN12345",
+                "--fallback-dpu-serial-number",
+                "dpu1",
+                "-d",
+                "dpu2",
+                "-d",
+                "dpu3",
+            ][..] => Yields(false),
+        }
+
+        "a repeated serial is detected" {
+            &[
+                "ExpectedMachine",
+                "--bmc-mac-address",
+                "0a:0b:0c:0d:0e:0f",
+                "--bmc-username",
+                "admin",
+                "--bmc-password",
+                "secret",
+                "--chassis-serial-number",
+                "SN12345",
+                "-d",
+                "dpu1",
+                "-d",
+                "dpu2",
+                "-d",
+                "dpu3",
+                "-d",
+                "dpu1",
+            ][..] => Yields(true),
+        }
+
+        "no serials at all" {
+            &[
+                "ExpectedMachine",
+                "--bmc-mac-address",
+                "0a:0b:0c:0d:0e:0f",
+                "--bmc-username",
+                "admin",
+                "--bmc-password",
+                "secret",
+                "--chassis-serial-number",
+                "SN12345",
+            ][..] => Yields(false),
+        }
     );
 }
 
@@ -513,87 +499,106 @@ fn parse_add_without_dpu_mode() {
     }
 }
 
-// parse_add_with_dpu_mode_nic ensures `--dpu-mode nic-mode`
-// parses to the NicMode variant.
+// `--dpu-mode <value>` parses to the matching DpuMode variant on both `add`
+// (alongside the required credential/chassis args) and `patch` (where flipping
+// dpu_mode on a single host is the whole point). The closure pulls dpu_mode off
+// whichever variant parsed; each row pins the parsed `Some(variant)`.
 #[test]
-fn parse_add_with_dpu_mode_nic() {
-    let cmd = Cmd::try_parse_from([
-        "expected-machine",
-        "add",
-        "--bmc-mac-address",
-        "1a:2b:3c:4d:5e:6f",
-        "--bmc-username",
-        "admin",
-        "--bmc-password",
-        "secret",
-        "--chassis-serial-number",
-        "SN12345",
-        "--dpu-mode",
-        "nic-mode",
-    ])
-    .expect("should parse nic-mode");
-
-    match cmd {
-        Cmd::Add(args) => {
-            assert!(matches!(args.dpu_mode, Some(rpc::forge::DpuMode::NicMode)));
+fn parse_dpu_mode_to_its_variant() {
+    scenarios!(
+        run = |argv| {
+            Cmd::try_parse_from(argv.iter().copied())
+                .map(|cmd| match cmd {
+                    Cmd::Add(args) => args.dpu_mode,
+                    Cmd::Patch(args) => args.dpu_mode,
+                    _ => panic!("expected Add or Patch variant"),
+                })
+                .map_err(drop)
+        };
+        "add --dpu-mode nic-mode" {
+            &[
+                "expected-machine",
+                "add",
+                "--bmc-mac-address",
+                "1a:2b:3c:4d:5e:6f",
+                "--bmc-username",
+                "admin",
+                "--bmc-password",
+                "secret",
+                "--chassis-serial-number",
+                "SN12345",
+                "--dpu-mode",
+                "nic-mode",
+            ][..] => Yields(Some(rpc::forge::DpuMode::NicMode)),
         }
-        _ => panic!("expected Add variant"),
-    }
-}
 
-// parse_add_with_dpu_mode_no_dpu ensures `--dpu-mode no-dpu` parses
-// correctly (host with zero DPU hardware at all).
-#[test]
-fn parse_add_with_dpu_mode_no_dpu() {
-    let cmd = Cmd::try_parse_from([
-        "expected-machine",
-        "add",
-        "--bmc-mac-address",
-        "1a:2b:3c:4d:5e:6f",
-        "--bmc-username",
-        "admin",
-        "--bmc-password",
-        "secret",
-        "--chassis-serial-number",
-        "SN12345",
-        "--dpu-mode",
-        "no-dpu",
-    ])
-    .expect("should parse no-dpu");
-
-    match cmd {
-        Cmd::Add(args) => {
-            assert!(matches!(args.dpu_mode, Some(rpc::forge::DpuMode::NoDpu)));
+        "add --dpu-mode no-dpu" {
+            &[
+                "expected-machine",
+                "add",
+                "--bmc-mac-address",
+                "1a:2b:3c:4d:5e:6f",
+                "--bmc-username",
+                "admin",
+                "--bmc-password",
+                "secret",
+                "--chassis-serial-number",
+                "SN12345",
+                "--dpu-mode",
+                "no-dpu",
+            ][..] => Yields(Some(rpc::forge::DpuMode::NoDpu)),
         }
-        _ => panic!("expected Add variant"),
-    }
-}
 
-// parse_add_with_dpu_mode_dpu ensures `--dpu-mode dpu-mode` parses.
-#[test]
-fn parse_add_with_dpu_mode_dpu() {
-    let cmd = Cmd::try_parse_from([
-        "expected-machine",
-        "add",
-        "--bmc-mac-address",
-        "1a:2b:3c:4d:5e:6f",
-        "--bmc-username",
-        "admin",
-        "--bmc-password",
-        "secret",
-        "--chassis-serial-number",
-        "SN12345",
-        "--dpu-mode",
-        "dpu-mode",
-    ])
-    .expect("should parse dpu-mode");
-
-    match cmd {
-        Cmd::Add(args) => {
-            assert!(matches!(args.dpu_mode, Some(rpc::forge::DpuMode::DpuMode)));
+        "add --dpu-mode dpu-mode" {
+            &[
+                "expected-machine",
+                "add",
+                "--bmc-mac-address",
+                "1a:2b:3c:4d:5e:6f",
+                "--bmc-username",
+                "admin",
+                "--bmc-password",
+                "secret",
+                "--chassis-serial-number",
+                "SN12345",
+                "--dpu-mode",
+                "dpu-mode",
+            ][..] => Yields(Some(rpc::forge::DpuMode::DpuMode)),
         }
-        _ => panic!("expected Add variant"),
-    }
+
+        "patch --dpu-mode nic-mode" {
+            &[
+                "expected-machine",
+                "patch",
+                "--bmc-mac-address",
+                "1a:2b:3c:4d:5e:6f",
+                "--dpu-mode",
+                "nic-mode",
+            ][..] => Yields(Some(rpc::forge::DpuMode::NicMode)),
+        }
+
+        "patch --dpu-mode no-dpu" {
+            &[
+                "expected-machine",
+                "patch",
+                "--bmc-mac-address",
+                "1a:2b:3c:4d:5e:6f",
+                "--dpu-mode",
+                "no-dpu",
+            ][..] => Yields(Some(rpc::forge::DpuMode::NoDpu)),
+        }
+
+        "patch --dpu-mode dpu-mode" {
+            &[
+                "expected-machine",
+                "patch",
+                "--bmc-mac-address",
+                "1a:2b:3c:4d:5e:6f",
+                "--dpu-mode",
+                "dpu-mode",
+            ][..] => Yields(Some(rpc::forge::DpuMode::DpuMode)),
+        }
+    );
 }
 
 // parse_add_rejects_invalid_dpu_mode ensures clap rejects values that
@@ -618,74 +623,6 @@ fn parse_add_rejects_invalid_dpu_mode() {
         result.is_err(),
         "clap should reject --dpu-mode with an invalid value"
     );
-}
-
-// parse_patch_with_dpu_mode_nic ensures `patch ... --dpu-mode nic-mode`
-// parses to NicMode. Patch users flip dpu_mode on a single host without
-// rewriting the entire ExpectedMachine.
-#[test]
-fn parse_patch_with_dpu_mode_nic() {
-    let cmd = Cmd::try_parse_from([
-        "expected-machine",
-        "patch",
-        "--bmc-mac-address",
-        "1a:2b:3c:4d:5e:6f",
-        "--dpu-mode",
-        "nic-mode",
-    ])
-    .expect("should parse patch --dpu-mode nic-mode");
-
-    match cmd {
-        Cmd::Patch(args) => {
-            assert!(matches!(args.dpu_mode, Some(rpc::forge::DpuMode::NicMode)));
-        }
-        _ => panic!("expected Patch variant"),
-    }
-}
-
-// parse_patch_with_dpu_mode_no_dpu ensures `patch ... --dpu-mode no-dpu`
-// parses (host with no DPU hardware at all).
-#[test]
-fn parse_patch_with_dpu_mode_no_dpu() {
-    let cmd = Cmd::try_parse_from([
-        "expected-machine",
-        "patch",
-        "--bmc-mac-address",
-        "1a:2b:3c:4d:5e:6f",
-        "--dpu-mode",
-        "no-dpu",
-    ])
-    .expect("should parse patch --dpu-mode no-dpu");
-
-    match cmd {
-        Cmd::Patch(args) => {
-            assert!(matches!(args.dpu_mode, Some(rpc::forge::DpuMode::NoDpu)));
-        }
-        _ => panic!("expected Patch variant"),
-    }
-}
-
-// parse_patch_with_dpu_mode_dpu ensures `patch ... --dpu-mode dpu-mode`
-// parses; this is how operators revert a host back to the default after
-// previously setting NicMode/NoDpu.
-#[test]
-fn parse_patch_with_dpu_mode_dpu() {
-    let cmd = Cmd::try_parse_from([
-        "expected-machine",
-        "patch",
-        "--bmc-mac-address",
-        "1a:2b:3c:4d:5e:6f",
-        "--dpu-mode",
-        "dpu-mode",
-    ])
-    .expect("should parse patch --dpu-mode dpu-mode");
-
-    match cmd {
-        Cmd::Patch(args) => {
-            assert!(matches!(args.dpu_mode, Some(rpc::forge::DpuMode::DpuMode)));
-        }
-        _ => panic!("expected Patch variant"),
-    }
 }
 
 // validate_patch_with_dpu_mode_only ensures `patch --dpu-mode nic-mode`

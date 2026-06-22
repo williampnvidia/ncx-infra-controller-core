@@ -276,7 +276,7 @@ async fn run_common_parts(
     virtualization_type: VpcVirtualizationType,
     test_metadata_service: bool,
 ) -> eyre::Result<TestOut> {
-    carbide_host_support::init_logging()?;
+    carbide_host_support::init_logging("nico-dpu-agent")?;
 
     let state: Arc<Mutex<State>> = Arc::new(Mutex::new(Default::default()));
     state.lock().await.virtualization_type = virtualization_type;
@@ -885,6 +885,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         }),
 
         dhcp_servers: vec!["127.0.0.1".to_string()],
+        ntp_servers: vec![],
         vni_device: "".to_string(),
 
         managed_host_config: Some(rpc::forge::ManagedHostNetworkConfig {

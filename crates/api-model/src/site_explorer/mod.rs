@@ -307,10 +307,28 @@ impl ExploredEndpoint {
 }
 
 impl EndpointExplorationReport {
+    /// The boot interface MAC for this endpoint's explored default -- the boot
+    /// interface site-explorer records before any machine owns the endpoint.
+    ///
+    /// A declared `ExpectedHostNic.primary` wins when this report has that NIC,
+    /// whatever its type (an integrated NIC as readily as a DPU host-PF), so the
+    /// explored default agrees with the managed store's declared primary across
+    /// the ownership handoff. Absent a declaration, it falls back to the
+    /// automatic pick: the lowest-PCI DPU host-PF interface.
     pub fn fetch_host_primary_interface_mac(
         &self,
         explored_dpus: &[ExploredDpu],
+        declared_primary: Option<MacAddress>,
     ) -> Option<MacAddress> {
+        // A declared primary wins as long as the report has it as a full pair
+        // (`find_interface_id_for_mac` scans every system ethernet interface,
+        // integrated NICs included).
+        if let Some(declared) = declared_primary
+            && self.find_interface_id_for_mac(declared).is_some()
+        {
+            return Some(declared);
+        }
+
         let system = self.systems.first()?;
 
         // Gather explored DPUs mac.
@@ -406,6 +424,14 @@ pub enum PreingestionState {
     /// PCIe inventory.
     InitialBMCReset {
         phase: InitialBmcResetPhase,
+    },
+    /// Configure site NTP servers on the BMC before checking whether its clock
+    /// is synchronized. `set_at` records a successful Redfish update so the
+    /// state machine can wait for the setting to take effect before checking.
+    SetNtpServers {
+        set_at: Option<DateTime<Utc>>,
+        #[serde(default)]
+        attempts: u32,
     },
     TimeSyncReset {
         phase: TimeSyncResetPhase,
@@ -1554,7 +1580,7 @@ pub fn is_bluefield_model(model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::{Case, check_cases};
+    use carbide_test_support::{Case, check_cases, scenarios, value_scenarios};
 
     use super::*;
     use crate::firmware::FirmwareComponent;
@@ -1621,30 +1647,25 @@ mod tests {
     #[test]
     fn test_find_version() {
         let fw_info = create_test_firmware(FirmwareComponentType::Bmc, r"^BMC_Firmware$");
-        check_cases(
-            [
-                Case {
-                    scenario: "single match",
-                    input: vec![("BMC_Firmware", Some("1.2.3")), ("DPU_UEFI", Some("4.5.6"))],
-                    expect: Yields("1.2.3".to_string()),
-                },
-                Case {
-                    scenario: "no match",
-                    input: vec![
-                        ("DPU_UEFI", Some("4.5.6")),
-                        ("Other_Component", Some("7.8.9")),
-                    ],
-                    expect: Fails,
-                },
-            ],
+        scenarios!(
             // Build an endpoint from the inventories, then look up the BMC
             // version; absent -> error so the no-match row reads as a failure.
-            |inventories| {
+            run = |inventories| {
                 create_test_endpoint(inventories)
                     .find_version(&fw_info, FirmwareComponentType::Bmc)
                     .cloned()
                     .ok_or(())
-            },
+            };
+            "single match" {
+                vec![("BMC_Firmware", Some("1.2.3")), ("DPU_UEFI", Some("4.5.6"))] => Yields("1.2.3".to_string()),
+            }
+
+            "no match" {
+                vec![
+                    ("DPU_UEFI", Some("4.5.6")),
+                    ("Other_Component", Some("7.8.9")),
+                ] => Fails,
+            }
         );
     }
 
@@ -2093,17 +2114,63 @@ mod tests {
         assert_eq!(report.revision_id, None);
     }
 
+    // is_power_shelf identifies a power shelf either by a chassis id containing
+    // "powershelf" (manufacturer irrelevant) or by the generic "chassis" id paired
+    // with a Lite-On or Delta manufacturer. Any other id/manufacturer pairing is
+    // not a power shelf. Each row supplies a single chassis's id + manufacturer.
     #[test]
-    fn is_power_shelf_with_powershelf_chassis_id() {
-        let report = EndpointExplorationReport {
-            chassis: vec![Chassis {
-                id: "powershelf".to_string(),
-                manufacturer: Some("doesnt-matter-in-this-case".to_string()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert!(report.is_power_shelf());
+    fn is_power_shelf_by_chassis_id_or_manufacturer() {
+        struct ChassisInput {
+            id: &'static str,
+            manufacturer: Option<&'static str>,
+        }
+        value_scenarios!(
+            run = |ChassisInput { id, manufacturer }| {
+                EndpointExplorationReport {
+                    chassis: vec![Chassis {
+                        id: id.to_string(),
+                        manufacturer: manufacturer.map(str::to_string),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }
+                .is_power_shelf()
+            };
+            "powershelf chassis id (manufacturer irrelevant)" {
+                ChassisInput {
+                    id: "powershelf",
+                    manufacturer: Some("doesnt-matter-in-this-case"),
+                } => true,
+            }
+
+            "generic chassis id + Lite-On manufacturer" {
+                ChassisInput {
+                    id: "chassis",
+                    manufacturer: Some("LITE-ON TECHNOLOGY CORP."),
+                } => true,
+            }
+
+            "generic chassis id + Delta manufacturer" {
+                ChassisInput {
+                    id: "chassis",
+                    manufacturer: Some("DELTA"),
+                } => true,
+            }
+
+            "generic chassis id + other manufacturer" {
+                ChassisInput {
+                    id: "chassis",
+                    manufacturer: Some("Dell Inc."),
+                } => false,
+            }
+
+            "generic chassis id + no manufacturer" {
+                ChassisInput {
+                    id: "chassis",
+                    manufacturer: None,
+                } => false,
+            }
+        );
     }
 
     /// `find_interface_id_for_mac` returns the Redfish interface id of the host
@@ -2146,35 +2213,28 @@ mod tests {
             ..Default::default()
         };
 
-        check_cases(
-            [
-                Case {
-                    scenario: "matching MAC yields its interface id",
-                    input: (two_iface_report.clone(), mac),
-                    expect: Yields("NIC.Slot.7-1-1".to_string()),
-                },
-                Case {
-                    scenario: "unknown MAC -> None (keeps last-known-good record)",
-                    input: (two_iface_report, MacAddress::new([0, 0, 0, 0, 0, 0])),
-                    expect: Fails,
-                },
-                Case {
-                    scenario: "MAC present but no interface id -> no complete pair",
-                    input: (single_iface_report(None), mac),
-                    expect: Fails,
-                },
-                Case {
-                    scenario: "empty id treated as absent (don't clobber stored boot interface)",
-                    input: (single_iface_report(Some(String::new())), mac),
-                    expect: Fails,
-                },
-            ],
-            |(report, mac)| {
+        scenarios!(
+            run = |(report, mac)| {
                 report
                     .find_interface_id_for_mac(mac)
                     .map(str::to_string)
                     .ok_or(())
-            },
+            };
+            "matching MAC yields its interface id" {
+                (two_iface_report.clone(), mac) => Yields("NIC.Slot.7-1-1".to_string()),
+            }
+
+            "unknown MAC -> None (keeps last-known-good record)" {
+                (two_iface_report, MacAddress::new([0, 0, 0, 0, 0, 0])) => Fails,
+            }
+
+            "MAC present but no interface id -> no complete pair" {
+                (single_iface_report(None), mac) => Fails,
+            }
+
+            "empty id treated as absent (don't clobber stored boot interface)" {
+                (single_iface_report(Some(String::new())), mac) => Fails,
+            }
         );
     }
 
@@ -2241,132 +2301,73 @@ mod tests {
         );
     }
 
-    #[test]
-    fn is_power_shelf_with_chassis_id_and_liteon_manufacturer() {
-        let report = EndpointExplorationReport {
-            chassis: vec![Chassis {
-                id: "chassis".to_string(),
-                manufacturer: Some("LITE-ON TECHNOLOGY CORP.".to_string()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert!(report.is_power_shelf());
-    }
-
-    #[test]
-    fn is_power_shelf_with_chassis_id_and_delta_manufacturer() {
-        let report = EndpointExplorationReport {
-            chassis: vec![Chassis {
-                id: "chassis".to_string(),
-                manufacturer: Some("DELTA".to_string()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert!(report.is_power_shelf());
-    }
-
-    #[test]
-    fn is_power_shelf_with_generic_chassis_id_not_liteon() {
-        let report = EndpointExplorationReport {
-            chassis: vec![Chassis {
-                id: "chassis".to_string(),
-                manufacturer: Some("Dell Inc.".to_string()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert!(!report.is_power_shelf());
-    }
-
-    #[test]
-    fn is_power_shelf_with_no_manufacturer() {
-        let report = EndpointExplorationReport {
-            chassis: vec![Chassis {
-                id: "chassis".to_string(),
-                manufacturer: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert!(!report.is_power_shelf());
-    }
-
     /// A `ComputerSystem` deserializes regardless of the `BaseMac` field: a valid
     /// value parses through, while an invalid, null, or missing one becomes `None`.
     /// Each row projects to the resulting `base_mac`.
     #[test]
     fn test_computer_system_base_mac_deserialization() {
-        check_cases(
-            [
-                Case {
-                    scenario: "invalid BaseMac -> None",
-                    input: serde_json::json!({
-                        "EthernetInterfaces": [],
-                        "Id": "Bluefield",
-                        "Manufacturer": "Nvidia",
-                        "Model": "Bluefield-3 DPU",
-                        "SerialNumber": "ABC1234",
-                        "Attributes": {},
-                        "PcieDevices": [],
-                        "BaseMac": "pe:",
-                        "PowerState": "On"
-                    }),
-                    expect: Yields(None),
-                },
-                Case {
-                    scenario: "valid BaseMac parses through",
-                    input: serde_json::json!({
-                        "EthernetInterfaces": [],
-                        "Id": "Bluefield",
-                        "Manufacturer": "Nvidia",
-                        "Model": "Bluefield-3 DPU",
-                        "SerialNumber": "ABC1234",
-                        "Attributes": {},
-                        "PcieDevices": [],
-                        "BaseMac": "A088C208804C",
-                        "PowerState": "On"
-                    }),
-                    expect: Yields(Some("A088C208804C".parse().unwrap())),
-                },
-                Case {
-                    scenario: "null BaseMac -> None",
-                    input: serde_json::json!({
-                        "EthernetInterfaces": [],
-                        "Id": "Bluefield",
-                        "Manufacturer": "Nvidia",
-                        "Model": "Bluefield-3 DPU",
-                        "SerialNumber": "ABC1234",
-                        "Attributes": {},
-                        "PcieDevices": [],
-                        "BaseMac": null,
-                        "PowerState": "On"
-                    }),
-                    expect: Yields(None),
-                },
-                Case {
-                    scenario: "missing BaseMac -> None",
-                    input: serde_json::json!({
-                        "EthernetInterfaces": [],
-                        "Id": "Bluefield",
-                        "Manufacturer": "Nvidia",
-                        "Model": "Bluefield-3 DPU",
-                        "SerialNumber": "ABC1234",
-                        "Attributes": {},
-                        "PcieDevices": [],
-                        "PowerState": "On"
-                    }),
-                    expect: Yields(None),
-                },
-            ],
+        scenarios!(
             // Deserialize and project to base_mac; every row is expected to
             // deserialize, so the (non-PartialEq) serde error is discarded.
-            |json| {
+            run = |json| {
                 serde_json::from_value::<ComputerSystem>(json)
                     .map(|system| system.base_mac)
                     .map_err(drop)
-            },
+            };
+            "invalid BaseMac -> None" {
+                serde_json::json!({
+                    "EthernetInterfaces": [],
+                    "Id": "Bluefield",
+                    "Manufacturer": "Nvidia",
+                    "Model": "Bluefield-3 DPU",
+                    "SerialNumber": "ABC1234",
+                    "Attributes": {},
+                    "PcieDevices": [],
+                    "BaseMac": "pe:",
+                    "PowerState": "On"
+                }) => Yields(None),
+            }
+
+            "valid BaseMac parses through" {
+                serde_json::json!({
+                    "EthernetInterfaces": [],
+                    "Id": "Bluefield",
+                    "Manufacturer": "Nvidia",
+                    "Model": "Bluefield-3 DPU",
+                    "SerialNumber": "ABC1234",
+                    "Attributes": {},
+                    "PcieDevices": [],
+                    "BaseMac": "A088C208804C",
+                    "PowerState": "On"
+                }) => Yields(Some("A088C208804C".parse().unwrap())),
+            }
+
+            "null BaseMac -> None" {
+                serde_json::json!({
+                    "EthernetInterfaces": [],
+                    "Id": "Bluefield",
+                    "Manufacturer": "Nvidia",
+                    "Model": "Bluefield-3 DPU",
+                    "SerialNumber": "ABC1234",
+                    "Attributes": {},
+                    "PcieDevices": [],
+                    "BaseMac": null,
+                    "PowerState": "On"
+                }) => Yields(None),
+            }
+
+            "missing BaseMac -> None" {
+                serde_json::json!({
+                    "EthernetInterfaces": [],
+                    "Id": "Bluefield",
+                    "Manufacturer": "Nvidia",
+                    "Model": "Bluefield-3 DPU",
+                    "SerialNumber": "ABC1234",
+                    "Attributes": {},
+                    "PcieDevices": [],
+                    "PowerState": "On"
+                }) => Yields(None),
+            }
         );
     }
 }

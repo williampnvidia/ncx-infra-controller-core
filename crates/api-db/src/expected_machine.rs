@@ -286,7 +286,7 @@ pub async fn create(
                 .default_pause_ingestion_and_poweron
                 .unwrap_or(false),
         )
-        .bind(machine.data.dpf_enabled.unwrap_or_default())
+        .bind(machine.data.dpf_enabled.unwrap_or(true))
         .bind(machine.data.bmc_ip_address)
         .bind(machine.data.bmc_retain_credentials.unwrap_or(false))
         .bind(machine.data.dpu_mode)
@@ -448,3 +448,6 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

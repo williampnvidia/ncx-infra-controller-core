@@ -170,6 +170,22 @@ pub struct ExpectedMachineData {
 // unless you want to go update all the files in each production deployment that autoload
 // the expected machines on api startup
 
+impl ExpectedMachineData {
+    /// The MAC the operator declared as this host's boot interface via
+    /// `ExpectedHostNic.primary`. This is the single source of declared boot
+    /// intent the writers consult -- site-explorer ingestion, DHCP, and
+    /// prediction promotion -- so they all agree on which NIC wins. The API
+    /// enforces at most one `primary` host NIC, so the first match is the
+    /// declaration. `None` leaves the boot interface to today's automation
+    /// (DPU takeover during ingestion, else the `pick_boot_interface` fallback).
+    pub fn declared_primary_mac(&self) -> Option<MacAddress> {
+        self.host_nics
+            .iter()
+            .find(|nic| nic.primary == Some(true))
+            .map(|nic| nic.mac_address)
+    }
+}
+
 /// Per-host lifecycle profile for settings that affect state-machine progression.
 /// `Option<bool>` fields support CLI patch semantics (`None` = not specified,
 /// keep existing DB value via `COALESCE`). Converts to the runtime `HostProfile`
@@ -254,7 +270,7 @@ pub struct UnexpectedMachine {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::{Case, check_cases};
+    use carbide_test_support::scenarios;
 
     use super::*;
 
@@ -362,36 +378,31 @@ mod tests {
     /// `HostLifecycleProfile::default()`, whose only field is `disable_lockdown`).
     #[test]
     fn host_lifecycle_profile_deserializes_from_json() {
-        check_cases(
-            [
-                Case {
-                    scenario: "missing host_lifecycle_profile defaults to None",
-                    input: r#"{
-                        "bmc_mac_address": "AA:BB:CC:DD:EE:FF",
-                        "bmc_username": "root",
-                        "bmc_password": "pass",
-                        "serial_number": "SN-1"
-                    }"#,
-                    expect: Yields(None),
-                },
-                Case {
-                    scenario: "present host_lifecycle_profile parses disable_lockdown",
-                    input: r#"{
-                        "bmc_mac_address": "AA:BB:CC:DD:EE:FF",
-                        "bmc_username": "root",
-                        "bmc_password": "pass",
-                        "serial_number": "SN-1",
-                        "host_lifecycle_profile": {"disable_lockdown": true}
-                    }"#,
-                    expect: Yields(Some(true)),
-                },
-            ],
+        scenarios!(
             // serde_json::Error is not PartialEq, so discard it on the error path.
-            |json| {
+            run = |json| {
                 serde_json::from_str::<ExpectedMachine>(json)
                     .map(|em| em.data.host_lifecycle_profile.disable_lockdown)
                     .map_err(drop)
-            },
+            };
+            "missing host_lifecycle_profile defaults to None" {
+                r#"{
+                            "bmc_mac_address": "AA:BB:CC:DD:EE:FF",
+                            "bmc_username": "root",
+                            "bmc_password": "pass",
+                            "serial_number": "SN-1"
+                        }"# => Yields(None),
+            }
+
+            "present host_lifecycle_profile parses disable_lockdown" {
+                r#"{
+                            "bmc_mac_address": "AA:BB:CC:DD:EE:FF",
+                            "bmc_username": "root",
+                            "bmc_password": "pass",
+                            "serial_number": "SN-1",
+                            "host_lifecycle_profile": {"disable_lockdown": true}
+                        }"# => Yields(Some(true)),
+            }
         );
     }
 
@@ -431,5 +442,41 @@ mod tests {
             disable_lockdown: Some(false),
         };
         assert!(!hlp.is_empty());
+    }
+
+    /// `declared_primary_mac` returns the MAC of the one NIC flagged
+    /// `primary: Some(true)`, and `None` when nothing is declared. `primary:
+    /// Some(false)` is an explicit non-primary, not a declaration.
+    #[test]
+    fn declared_primary_mac_returns_the_flagged_nic() {
+        let mac_a: MacAddress = "AA:BB:CC:00:00:01".parse().unwrap();
+        let mac_b: MacAddress = "AA:BB:CC:00:00:02".parse().unwrap();
+
+        let nic = |mac: MacAddress, primary: Option<bool>| ExpectedHostNic {
+            mac_address: mac,
+            primary,
+            ..Default::default()
+        };
+
+        // Nothing declared -- empty, or only explicit non-primaries.
+        assert_eq!(ExpectedMachineData::default().declared_primary_mac(), None);
+        assert_eq!(
+            ExpectedMachineData {
+                host_nics: vec![nic(mac_a, None), nic(mac_b, Some(false))],
+                ..Default::default()
+            }
+            .declared_primary_mac(),
+            None
+        );
+
+        // The declared NIC wins.
+        assert_eq!(
+            ExpectedMachineData {
+                host_nics: vec![nic(mac_a, Some(false)), nic(mac_b, Some(true))],
+                ..Default::default()
+            }
+            .declared_primary_mac(),
+            Some(mac_b)
+        );
     }
 }

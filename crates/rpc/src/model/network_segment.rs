@@ -87,6 +87,21 @@ impl TryFrom<rpc::forge::NetworkSegmentCreationRequest> for NewNetworkSegment {
             .map(NewNetworkPrefix::try_from)
             .collect::<Result<Vec<NewNetworkPrefix>, RpcDataConversionError>>()?;
 
+        let ipv4_prefix_count = prefixes
+            .iter()
+            .filter(|prefix| prefix.prefix.is_ipv4())
+            .count();
+        let ipv6_prefix_count = prefixes
+            .iter()
+            .filter(|prefix| prefix.prefix.is_ipv6())
+            .count();
+        if ipv4_prefix_count > 1 || ipv6_prefix_count > 1 {
+            return Err(RpcDataConversionError::InvalidArgument(
+                "Network segment cannot contain more than one prefix from the same address family."
+                    .to_string(),
+            ));
+        }
+
         let id = value.id.unwrap_or_else(|| uuid::Uuid::new_v4().into());
 
         let segment_type: NetworkSegmentType = value.segment_type.rpc_try_into()?;
@@ -130,9 +145,8 @@ impl TryFrom<rpc::forge::NetworkSegmentCreationRequest> for NewNetworkSegment {
 ///
 /// subdomain_id - Rust UUID -> ProtoBuf UUID(String) cannot fail, so convert it or return None
 #[allow(deprecated)]
-impl TryFrom<NetworkSegment> for rpc::NetworkSegment {
-    type Error = RpcDataConversionError;
-    fn try_from(src: NetworkSegment) -> Result<Self, Self::Error> {
+impl From<NetworkSegment> for rpc::NetworkSegment {
+    fn from(src: NetworkSegment) -> Self {
         // Deprecated TenantState mapping - kept to populate the backward-compat flat field.
         // Note that even though the segment might already be ready,
         // we only return `Ready` after the state machine also noticed that.
@@ -199,7 +213,7 @@ impl TryFrom<NetworkSegment> for rpc::NetworkSegment {
 
         let version = src.version.version_string();
 
-        Ok(rpc::NetworkSegment {
+        rpc::NetworkSegment {
             id: Some(src.id),
             created: Some(src.created.into()),
             updated: Some(src.updated.into()),
@@ -247,14 +261,14 @@ impl TryFrom<NetworkSegment> for rpc::NetworkSegment {
             history,
             state_reason,
             state_sla: Some(sla),
-        })
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::{Case, check_cases};
+    use carbide_test_support::scenarios;
 
     use super::*;
 
@@ -307,84 +321,93 @@ mod tests {
     // is IPv6); rejecting rows assert only that the conversion fails.
     #[test]
     fn try_from_creation_request_validates_prefixes() {
-        check_cases(
-            [
-                Case {
-                    scenario: "ipv6 prefix accepted (admin)",
-                    input: make_test_creation_request(
-                        vec![ipv6_prefix("2001:db8::/64")],
-                        NetworkSegmentType::Admin,
-                    ),
-                    expect: Yields((1, true)),
-                },
-                Case {
-                    scenario: "dual-stack prefixes accepted (admin)",
-                    input: make_test_creation_request(
-                        vec![
-                            ipv4_prefix("192.0.2.0/24", Some("192.0.2.1")),
-                            ipv6_prefix("2001:db8::/64"),
-                        ],
-                        NetworkSegmentType::Admin,
-                    ),
-                    expect: Yields((2, false)),
-                },
-                Case {
-                    scenario: "tenant /64 IPv6 allowed",
-                    input: make_test_creation_request(
-                        vec![ipv6_prefix("2001:db8::/64")],
-                        NetworkSegmentType::Tenant,
-                    ),
-                    expect: Yields((1, true)),
-                },
-                Case {
-                    scenario: "tenant /127 IPv6 rejected",
-                    input: make_test_creation_request(
-                        vec![ipv6_prefix("2001:db8::1/127")],
-                        NetworkSegmentType::Tenant,
-                    ),
-                    expect: Fails,
-                },
-                Case {
-                    scenario: "tenant /128 IPv6 rejected",
-                    input: make_test_creation_request(
-                        vec![ipv6_prefix("2001:db8::1/128")],
-                        NetworkSegmentType::Tenant,
-                    ),
-                    expect: Fails,
-                },
-                Case {
-                    scenario: "tenant /24 IPv4 allowed",
-                    input: make_test_creation_request(
-                        vec![ipv4_prefix("192.0.2.0/24", Some("192.0.2.1"))],
-                        NetworkSegmentType::Tenant,
-                    ),
-                    expect: Yields((1, false)),
-                },
-                Case {
-                    scenario: "tenant /31 IPv4 rejected",
-                    input: make_test_creation_request(
-                        vec![ipv4_prefix("192.0.2.0/31", Some("192.0.2.1"))],
-                        NetworkSegmentType::Tenant,
-                    ),
-                    expect: Fails,
-                },
-                Case {
-                    scenario: "tenant /32 IPv4 rejected",
-                    input: make_test_creation_request(
-                        vec![ipv4_prefix("192.0.2.0/32", None)],
-                        NetworkSegmentType::Tenant,
-                    ),
-                    expect: Fails,
-                },
-            ],
+        scenarios!(
             // The error type (RpcDataConversionError) is not asserted by these rows,
             // so failing rows discard it; accepting rows project to the prefix count
             // and whether the first prefix is IPv6.
-            |request| {
+            run = |request| {
                 NewNetworkSegment::try_from(request)
                     .map(|segment| (segment.prefixes.len(), segment.prefixes[0].prefix.is_ipv6()))
                     .map_err(drop)
-            },
+            };
+            "ipv6 prefix accepted (admin)" {
+                make_test_creation_request(
+                    vec![ipv6_prefix("2001:db8::/64")],
+                    NetworkSegmentType::Admin,
+                ) => Yields((1, true)),
+            }
+
+            "dual-stack prefixes accepted (admin)" {
+                make_test_creation_request(
+                    vec![
+                        ipv4_prefix("192.0.2.0/24", Some("192.0.2.1")),
+                        ipv6_prefix("2001:db8::/64"),
+                    ],
+                    NetworkSegmentType::Admin,
+                ) => Yields((2, false)),
+            }
+
+            "two IPv4 prefixes rejected" {
+                make_test_creation_request(
+                    vec![
+                        ipv4_prefix("192.0.2.0/24", Some("192.0.2.1")),
+                        ipv4_prefix("198.51.100.0/24", Some("198.51.100.1")),
+                    ],
+                    NetworkSegmentType::Admin,
+                ) => Fails,
+            }
+
+            "two IPv6 prefixes rejected" {
+                make_test_creation_request(
+                    vec![
+                        ipv6_prefix("2001:db8:1::/64"),
+                        ipv6_prefix("2001:db8:2::/64"),
+                    ],
+                    NetworkSegmentType::Admin,
+                ) => Fails,
+            }
+
+            "tenant /64 IPv6 allowed" {
+                make_test_creation_request(
+                    vec![ipv6_prefix("2001:db8::/64")],
+                    NetworkSegmentType::Tenant,
+                ) => Yields((1, true)),
+            }
+
+            "tenant /127 IPv6 rejected" {
+                make_test_creation_request(
+                    vec![ipv6_prefix("2001:db8::1/127")],
+                    NetworkSegmentType::Tenant,
+                ) => Fails,
+            }
+
+            "tenant /128 IPv6 rejected" {
+                make_test_creation_request(
+                    vec![ipv6_prefix("2001:db8::1/128")],
+                    NetworkSegmentType::Tenant,
+                ) => Fails,
+            }
+
+            "tenant /24 IPv4 allowed" {
+                make_test_creation_request(
+                    vec![ipv4_prefix("192.0.2.0/24", Some("192.0.2.1"))],
+                    NetworkSegmentType::Tenant,
+                ) => Yields((1, false)),
+            }
+
+            "tenant /31 IPv4 rejected" {
+                make_test_creation_request(
+                    vec![ipv4_prefix("192.0.2.0/31", Some("192.0.2.1"))],
+                    NetworkSegmentType::Tenant,
+                ) => Fails,
+            }
+
+            "tenant /32 IPv4 rejected" {
+                make_test_creation_request(
+                    vec![ipv4_prefix("192.0.2.0/32", None)],
+                    NetworkSegmentType::Tenant,
+                ) => Fails,
+            }
         );
     }
 }

@@ -96,6 +96,11 @@ cargo test
 cargo make correctly-execute-tests
 ```
 
+When writing tests, prefer the **table-driven** style — see the [Testing section in `STYLE_GUIDE.md`](STYLE_GUIDE.md#testing).
+Enumerating a function's input variants as grouped `carbide-test-support` scenarios (`scenarios!` / `value_scenarios!`)
+or explicit cases (`check_cases` / `check_values`) is the easiest way to reach thorough coverage of parsers, validators,
+conversions, and the like.
+
 ### Linting and Formatting
 
 ```bash
@@ -141,6 +146,10 @@ Core (Rust) tasks are not in this Makefile; use cargo and `cargo make`
 directly as documented above.
 
 ## Coding Conventions
+
+Follow the shared [Engineering Guidelines](CONTRIBUTING.md#engineering-guidelines)
+for scope control, reuse-before-new-code, evidence-backed assumptions, and
+verification expectations.
 
 See [`STYLE_GUIDE.md`](STYLE_GUIDE.md) for detailed Rust coding conventions.
 Make sure to review it to ensure changes meet the expected style of the codebase.

@@ -279,6 +279,39 @@ tags:
       - `rackLevelAdministration` capability attribute was deprecated in favor of `flow` and was removed on May 13th, 2026 0:00 UTC. Please use `flow` instead.
       - `isRackLevelAdministrationEnabled` query parameter was deprecated in favor of `isFlowEnabled` and was removed on May 13th, 2026 0:00 UTC. Please use `isFlowEnabled` instead.
 paths:
+  '/v2/org/{org}/nico/credential/bmc':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    put:
+      summary: Create Or Update BMC Credential
+      tags:
+        - BMC Credential
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BMCCredentialRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BMCCredential'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      operationId: create-or-update-bmc-credential
+      description: |-
+        Create or update a site-wide or per-BMC root credential. Equivalent
+        to `carbide-admin-cli credential add-bmc`.
+
+        User must have authorization role with `PROVIDER_ADMIN` suffix.
   '/v2/org/{org}/nico/service-account/current':
     parameters:
       - schema:
@@ -12904,6 +12937,59 @@ paths:
           $ref: '#/components/responses/GenericHttpError'
 components:
   schemas:
+    BMCCredentialRequest:
+      type: object
+      title: BMCCredentialRequest
+      description: Request to create or update a BMC credential.
+      required:
+        - siteId
+        - kind
+        - password
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site where the credential is stored.
+        kind:
+          type: string
+          description: Which BMC credential to store.
+          enum:
+            - site-wide-root
+            - bmc-root
+        password:
+          type: string
+          minLength: 1
+          description: Credential password.
+        username:
+          type: string
+          description: Optional username; Core defaults to "root" for bmc-root when omitted.
+        macAddress:
+          type: string
+          description: BMC MAC address. Required for kind bmc-root, ignored for site-wide-root.
+    BMCCredential:
+      type: object
+      title: BMCCredential
+      description: BMC credential metadata returned after create or update. Password is never returned.
+      required:
+        - siteId
+        - kind
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site where the credential is stored.
+        kind:
+          type: string
+          description: Which BMC credential was stored.
+          enum:
+            - site-wide-root
+            - bmc-root
+        username:
+          type: string
+          description: Optional username; Core defaults to "root" for bmc-root when omitted.
+        macAddress:
+          type: string
+          description: BMC MAC address. Required for kind bmc-root, ignored for site-wide-root.
     InfrastructureProvider:
       description: Infrastructure providers own and manage datacenters
       type: object
@@ -17851,6 +17937,23 @@ components:
         powerState:
           type: string
           description: Current power state of the component
+        operationStatus:
+          type: string
+          enum:
+            - Unknown
+            - Initializing
+            - Ready
+            - InUse
+            - Error
+            - Deleting
+          description: Flow-derived operability phase of the component
+        leakStatus:
+          type: string
+          enum:
+            - Unknown
+            - NoLeak
+            - Leaking
+          description: Whether the component is considered leaking coolant
     BMCInfo:
       title: BMCInfo
       type: object
@@ -17925,6 +18028,23 @@ components:
         powerState:
           type: string
           description: Current power state of the tray
+        operationStatus:
+          type: string
+          enum:
+            - Unknown
+            - Initializing
+            - Ready
+            - InUse
+            - Error
+            - Deleting
+          description: Flow-derived operability phase of the tray
+        leakStatus:
+          type: string
+          enum:
+            - Unknown
+            - NoLeak
+            - Leaking
+          description: Whether the tray is considered leaking coolant
         position:
           $ref: '#/components/schemas/TrayPosition'
           description: 'Position of the Tray within the Rack'
@@ -18031,6 +18151,14 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this batch to the named rule and overrides Flow's default rule
             resolution.
+        overrideReadinessCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, proceed even if one or more target components (or hosts
+            on the owning rack for rack-scoped components) are reported as not
+            ready by their persisted status. Intended for operator-supervised
+            maintenance.
     BatchUpdateTrayPowerStateRequest:
       title: BatchUpdateTrayPowerStateRequest
       type: object
@@ -18062,6 +18190,14 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this batch to the named rule and overrides Flow's default rule
             resolution.
+        overrideReadinessCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, proceed even if one or more target components (or hosts
+            on the owning rack for rack-scoped components) are reported as not
+            ready by their persisted status. Intended for operator-supervised
+            maintenance.
     BatchRackFirmwareUpdateRequest:
       title: BatchRackFirmwareUpdateRequest
       type: object
@@ -18088,6 +18224,14 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this batch to the named rule and overrides Flow's default rule
             resolution.
+        overrideReadinessCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, proceed even if one or more target components (or hosts
+            on the owning rack for rack-scoped components) are reported as not
+            ready by their persisted status. Intended for operator-supervised
+            maintenance.
     BringUpRackRequest:
       title: BringUpRackRequest
       type: object
@@ -18108,6 +18252,13 @@ components:
           description: |-
             Optional Operation Rule UUID. When set, pins this bring-up to the
             named rule and overrides Flow's default rule resolution.
+        overrideReadinessCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, proceed even if one or more target components (or hosts
+            on the owning rack) are reported as not ready by their persisted
+            status. Intended for operator-supervised maintenance.
       examples:
         - siteId: 550e8400-e29b-41d4-a716-446655440000
         - siteId: 550e8400-e29b-41d4-a716-446655440000
@@ -18136,6 +18287,13 @@ components:
             Optional Operation Rule UUID. When set, pins every bring-up task
             spawned by this batch to the named rule and overrides Flow's default
             rule resolution.
+        overrideReadinessCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, proceed even if one or more target components (or hosts
+            on the owning rack) are reported as not ready by their persisted
+            status. Intended for operator-supervised maintenance.
     BringUpRackResponse:
       title: BringUpRackResponse
       type: object
@@ -18630,6 +18788,7 @@ components:
               - nvos
               - pmc
               - psu
+              - dpu
           description: |-
             Optional subset of firmware targets to update within each matched tray.
             Names are lowercase and select sub-parts of the tray
@@ -18646,8 +18805,15 @@ components:
                 and the whole bundle is applied. Will be honored once
                 compute moves to UpdateComponentFirmware.)
             Omitted or empty means "update everything in the bundle"
-            (the historical default). Unknown names are rejected.
-            Requires `version` to be set.
+            (the historical default) for compute-tray-internal targets.
+            Unknown names are rejected. Requires `version` to be set.
+            The special target `dpu`, valid only on compute trays,
+            requests DPU reprovisioning on each matched host. Unlike
+            the other targets, `dpu` is NOT covered by the
+            "omitted/empty means everything" default — it must be
+            listed explicitly. `version` is ignored on the `dpu`
+            branch; the target firmware version comes from site
+            configuration.
         ruleId:
           type: string
           format: uuid
@@ -18655,6 +18821,14 @@ components:
             Optional Operation Rule UUID. When set, pins every task spawned by
             this batch to the named rule and overrides Flow's default rule
             resolution.
+        overrideReadinessCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, proceed even if one or more target components (or hosts
+            on the owning rack for rack-scoped components) are reported as not
+            ready by their persisted status. Intended for operator-supervised
+            maintenance.
       examples:
         - siteId: 550e8400-e29b-41d4-a716-446655440000
           filter:
@@ -18694,6 +18868,14 @@ components:
           description: |-
             Optional Operation Rule UUID. When set, pins this operation to the
             named rule and overrides Flow's default rule resolution.
+        overrideReadinessCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, proceed even if one or more target components (or hosts
+            on the owning rack for rack-scoped components) are reported as not
+            ready by their persisted status. Intended for operator-supervised
+            maintenance.
       examples:
         - siteId: 550e8400-e29b-41d4-a716-446655440000
           state: 'on'
@@ -18743,6 +18925,7 @@ components:
               - nvos
               - pmc
               - psu
+              - dpu
           description: |-
             Optional subset of firmware targets to update within the targeted tray.
             Names are lowercase and select sub-parts of the tray
@@ -18759,14 +18942,29 @@ components:
                 and the whole bundle is applied. Will be honored once
                 compute moves to UpdateComponentFirmware.)
             Omitted or empty means "update everything in the bundle"
-            (the historical default). Unknown names are rejected.
-            Requires `version` to be set.
+            (the historical default) for compute-tray-internal targets.
+            Unknown names are rejected. Requires `version` to be set.
+            The special target `dpu`, valid only on compute trays,
+            requests DPU reprovisioning on the matched host. Unlike
+            the other targets, `dpu` is NOT covered by the
+            "omitted/empty means everything" default — it must be
+            listed explicitly. `version` is ignored on the `dpu`
+            branch; the target firmware version comes from site
+            configuration.
         ruleId:
           type: string
           format: uuid
           description: |-
             Optional Operation Rule UUID. When set, pins this firmware update to
             the named rule and overrides Flow's default rule resolution.
+        overrideReadinessCheck:
+          type: boolean
+          default: false
+          description: |-
+            When true, proceed even if one or more target components (or hosts
+            on the owning rack for rack-scoped components) are reported as not
+            ready by their persisted status. Intended for operator-supervised
+            maintenance.
       examples:
         - siteId: 550e8400-e29b-41d4-a716-446655440000
           version: '24.11.0'
@@ -19840,11 +20038,6 @@ components:
             - string
             - 'null'
           description: Description of this component
-        firmwareVersion:
-          type:
-            - string
-            - 'null'
-          description: Firmware version of this component
         slotId:
           type:
             - integer
@@ -19967,11 +20160,6 @@ components:
             - string
             - 'null'
           description: Description of this component
-        firmwareVersion:
-          type:
-            - string
-            - 'null'
-          description: Firmware version of this component
         slotId:
           type:
             - integer
@@ -20097,11 +20285,6 @@ components:
             - string
             - 'null'
           description: Description of this component
-        firmwareVersion:
-          type:
-            - string
-            - 'null'
-          description: Firmware version of this component
         slotId:
           type:
             - integer
@@ -20191,11 +20374,6 @@ components:
             - string
             - 'null'
           description: Description of this component
-        firmwareVersion:
-          type:
-            - string
-            - 'null'
-          description: Firmware version of this component
         slotId:
           type:
             - integer
@@ -20302,11 +20480,6 @@ components:
             - string
             - 'null'
           description: Description of this component
-        firmwareVersion:
-          type:
-            - string
-            - 'null'
-          description: Firmware version of this component
         slotId:
           type:
             - integer
@@ -20411,11 +20584,6 @@ components:
             - string
             - 'null'
           description: Description of this component
-        firmwareVersion:
-          type:
-            - string
-            - 'null'
-          description: Firmware version of this component
         slotId:
           type:
             - integer
@@ -20726,11 +20894,6 @@ components:
             - string
             - 'null'
           description: Description of this component
-        firmwareVersion:
-          type:
-            - string
-            - 'null'
-          description: Firmware version of this component
         slotId:
           type:
             - integer
@@ -20849,11 +21012,6 @@ components:
             - string
             - 'null'
           description: Description of this component
-        firmwareVersion:
-          type:
-            - string
-            - 'null'
-          description: Firmware version of this component
         slotId:
           type:
             - integer
@@ -20969,11 +21127,6 @@ components:
             - string
             - 'null'
           description: Description of this component
-        firmwareVersion:
-          type:
-            - string
-            - 'null'
-          description: Firmware version of this component
         slotId:
           type:
             - integer
