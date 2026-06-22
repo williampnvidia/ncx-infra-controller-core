@@ -262,8 +262,8 @@ async fn test_site_explorer_machine_audit_state_bulk_lookup_matches_existing_pat
         db::machine::find_site_explorer_machine_audit_states_by_bmc_ips(&mut txn, &bmc_ips).await?;
     txn.commit().await?;
 
-    existing_path_states.sort_by(|left, right| left.bmc_ip.cmp(&right.bmc_ip));
-    bulk_lookup_states.sort_by(|left, right| left.bmc_ip.cmp(&right.bmc_ip));
+    existing_path_states.sort_by_key(|state| state.bmc_ip);
+    bulk_lookup_states.sort_by_key(|state| state.bmc_ip);
 
     assert_eq!(bulk_lookup_states, existing_path_states);
 

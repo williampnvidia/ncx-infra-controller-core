@@ -3633,14 +3633,14 @@ mod tests {
 
         let mut previous_alert = new_alert.clone();
         previous_alert.observed_at = Some(alert_started_at);
-        let mut same_alert = new_alert.clone();
+        let mut same_alert = new_alert;
         same_alert.observed_at = None;
         assert!(!site_explorer_health_report_needs_update(
             Some(&previous_alert),
             &same_alert,
         ));
 
-        let mut timestamp_changed = same_alert.clone();
+        let mut timestamp_changed = same_alert;
         timestamp_changed.alerts[0].in_alert_since =
             Some(alert_started_at + chrono::Duration::seconds(1));
         assert!(site_explorer_health_report_needs_update(
