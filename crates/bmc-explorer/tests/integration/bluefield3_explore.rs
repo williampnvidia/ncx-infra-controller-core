@@ -190,6 +190,44 @@ async fn explore_bluefield3_recovers_oob_interface_from_boot_options() {
 }
 
 #[test]
+async fn explore_bluefield3_accepts_null_members_in_empty_boot_options() {
+    let h = test_support::dell_poweredge_r750_bluefield3_bmc(DpuSettings::default()).await;
+    h.state.injection.put(vec![bmc_mock::injection::Rule {
+        id: "null_boot_options_members".into(),
+        selector: bmc_mock::injection::Selector::Path {
+            method: Some("GET".into()),
+            glob: "/redfish/v1/Systems/Bluefield/BootOptions".into(),
+        },
+        action: bmc_mock::injection::Action::Replace(serde_json::json!({
+            "@odata.id": "/redfish/v1/Systems/Bluefield/BootOptions",
+            "@odata.type": "#BootOptionCollection.BootOptionCollection",
+            "Members": null,
+            "Members@odata.count": 0,
+            "Name": "Boot Option Collection",
+        })),
+        remaining: None,
+    }]);
+
+    let report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .expect("empty BF3 BootOptions with null Members must not fail exploration");
+    let system = report.systems.first().expect("systems must be present");
+
+    assert!(system.base_mac.is_some(), "DPU base MAC must be preserved");
+    assert!(
+        system.ethernet_interfaces.iter().any(|interface| {
+            interface.id.as_deref() == Some("oob_net0") && interface.mac_address.is_some()
+        }),
+        "explicit OOB interface must be preserved"
+    );
+    assert!(
+        report.dpu_pairing_serial_number().is_some(),
+        "DPU pairing serial number must be preserved"
+    );
+}
+
+#[test]
 async fn explore_bluefield3_retries_transient_404_on_system_eth_interfaces() {
     let settings = DpuSettings::default();
 
