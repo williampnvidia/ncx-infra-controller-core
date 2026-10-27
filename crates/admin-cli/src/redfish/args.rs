@@ -103,6 +103,32 @@ pub(super) enum Cmd {
     LockdownEnable,
     /// Display status of BMC/BIOS lockdown
     LockdownStatus,
+    /// Enable BMC lockdown without applying the full host lockdown policy
+    ///
+    /// On Lenovo, enables firmware and BIOS settings lockdown while preserving
+    /// UEFIVariablesRO and legacy controls. Does not reboot the host.
+    #[command(after_long_help = "\
+EXAMPLES:
+
+Restore BMC lockdown after a temporary unlock:
+    $ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword \
+    lockdown-bmc-enable
+
+")]
+    LockdownBmcEnable,
+    /// Disable BMC lockdown without applying the full host unlock policy
+    ///
+    /// On Lenovo, disables firmware and BIOS settings lockdown while preserving
+    /// UEFIVariablesRO and legacy controls. Does not reboot the host.
+    #[command(after_long_help = "\
+EXAMPLES:
+
+Temporarily unlock the BMC for firmware or BIOS operations:
+    $ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword \
+    lockdown-bmc-disable
+
+")]
+    LockdownBmcDisable,
     /// Force turn machine off
     #[clap(alias = "off", verbatim_doc_comment)]
     #[command(after_long_help = "\

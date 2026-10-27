@@ -20,7 +20,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
-use eyre::eyre;
+use eyre::{WrapErr, eyre};
 use libredfish::model::oem::nvidia_dpu::NicMode;
 use libredfish::model::software_inventory::SoftwareInventory;
 use libredfish::model::task::{Task, TaskState};
@@ -151,6 +151,18 @@ pub(crate) async fn action(action: RedfishAction) -> color_eyre::Result<()> {
         }
         LockdownStatus => {
             println!("{}", redfish.lockdown_status().await?);
+        }
+        LockdownBmcEnable => {
+            redfish
+                .lockdown_bmc(EnabledDisabled::Enabled)
+                .await
+                .wrap_err("while attempting to enable BMC lockdown")?;
+        }
+        LockdownBmcDisable => {
+            redfish
+                .lockdown_bmc(EnabledDisabled::Disabled)
+                .await
+                .wrap_err("while attempting to disable BMC lockdown")?;
         }
         ForceOff => {
             redfish.power(SystemPowerControl::ForceOff).await?;

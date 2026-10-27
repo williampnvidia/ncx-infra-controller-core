@@ -46,9 +46,9 @@ Sort output by specified field
 
 *Possible values:*
 
-> - primary-id: Sort by the primary ID
->
-> - state: Sort by state
+- primary-id: Sort by the primary ID
+
+- state: Sort by state
 
 `-h, --help`
 
@@ -86,6 +86,8 @@ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypasswo
 | [`lockdown-disable`](./redfish-lockdown-disable.md) | Disable BMC/BIOS lockdown |
 | [`lockdown-enable`](./redfish-lockdown-enable.md) | Enable BMC/BIOS lockdown |
 | [`lockdown-status`](./redfish-lockdown-status.md) | Display status of BMC/BIOS lockdown |
+| [`lockdown-bmc-enable`](./redfish-lockdown-bmc-enable.md) | Enable BMC lockdown without applying the full host lockdown policy |
+| [`lockdown-bmc-disable`](./redfish-lockdown-bmc-disable.md) | Disable BMC lockdown without applying the full host unlock policy |
 | [`force-off`](./redfish-force-off.md) | Force turn machine off |
 | [`force-restart`](./redfish-force-restart.md) | Force restart. This is equivalent to pressing the reset button on the front panel. |
 | [`graceful-restart`](./redfish-graceful-restart.md) | Graceful restart. Asks the OS to restart via ACPI |

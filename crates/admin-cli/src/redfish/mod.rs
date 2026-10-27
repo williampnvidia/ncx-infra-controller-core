@@ -24,5 +24,33 @@
 mod args;
 mod cmds;
 
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+    use clap::Parser;
+
+    use super::args::{Cmd, RedfishAction};
+
+    #[test]
+    fn lockdown_commands_select_full_or_bmc_policy() {
+        scenarios!(
+            run = |command| RedfishAction::try_parse_from([
+                "redfish", "--address", "192.0.2.10", command,
+            ])
+            .map(|action| action.command)
+            .map_err(drop);
+            "full host policy" {
+                "lockdown-enable" => Yields(Cmd::LockdownEnable),
+                "lockdown-disable" => Yields(Cmd::LockdownDisable),
+            }
+            "temporary BMC policy" {
+                "lockdown-bmc-enable" => Yields(Cmd::LockdownBmcEnable),
+                "lockdown-bmc-disable" => Yields(Cmd::LockdownBmcDisable),
+            }
+        );
+    }
+}
+
 pub(crate) use args::RedfishAction;
 pub(crate) use cmds::action;
