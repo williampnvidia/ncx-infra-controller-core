@@ -24,6 +24,9 @@
 mod args;
 mod cmds;
 
+pub(crate) use args::RedfishAction;
+pub(crate) use cmds::action;
+
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
@@ -51,6 +54,3 @@ mod tests {
         );
     }
 }
-
-pub(crate) use args::RedfishAction;
-pub(crate) use cmds::action;
