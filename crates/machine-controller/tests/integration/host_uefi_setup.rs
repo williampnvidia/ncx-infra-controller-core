@@ -19,6 +19,7 @@
 //! version selected before dispatch. Saved jobs use their persisted version;
 //! older jobs without one finish enrollment without claiming a site version.
 
+use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
@@ -132,10 +133,7 @@ async fn lenovo_ami_platform_setup_unlocks_and_reboots_before_password_setup(poo
     })
     .await;
     env.redfish_sim
-        .set_next_lockdown_status(libredfish::Status {
-            status: libredfish::StatusInternal::Partial,
-            message: "ConfigBMC unlocked, host interface disabled".to_string(),
-        });
+        .set_next_lockdown_status(libredfish::Status::build_fake_partial());
     let checkpoint = env.redfish_sim.timepoint();
 
     env.run_single_iteration().await;
