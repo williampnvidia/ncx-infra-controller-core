@@ -119,6 +119,65 @@ async fn lenovo_uefi_setup_unlocks_supported_bmc_controls(pool: PgPool) {
     }
 }
 
+/// ConfigBMC can be unlocked while the host interface remains disabled. The
+/// resulting Partial status must still trigger unlock/reboot before setup.
+#[sqlx_test]
+async fn lenovo_ami_platform_setup_unlocks_and_reboots_before_password_setup(pool: PgPool) {
+    let mut env = Env::builder(pool.clone()).build().await;
+    let mh = setup_host_with_vendor(&env, bmc_vendor::BMCVendor::LenovoAMI).await;
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Disabled);
+    mh.advance_state(ManagedHostState::HostInit {
+        machine_state: MachineState::WaitingForPlatformConfiguration { retry_count: 0 },
+    })
+    .await;
+    env.redfish_sim
+        .set_next_lockdown_status(libredfish::Status {
+            status: libredfish::StatusInternal::Partial,
+            message: "ConfigBMC unlocked, host interface disabled".to_string(),
+        });
+    let checkpoint = env.redfish_sim.timepoint();
+
+    env.run_single_iteration().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &ManagedHostState::HostInit {
+            machine_state: MachineState::WaitingForLockdown {
+                lockdown_info: LockdownInfo {
+                    state: LockdownState::SetLockdown,
+                    mode: LockdownMode::Disable,
+                },
+            },
+        }
+    );
+
+    env.run_single_iteration().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &ManagedHostState::HostInit {
+            machine_state: MachineState::WaitingForLockdown {
+                lockdown_info: LockdownInfo {
+                    state: LockdownState::TimeWaitForDPUDown,
+                    mode: LockdownMode::Disable,
+                },
+            },
+        }
+    );
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .contains(&libredfish::EnabledDisabled::Disabled)
+    );
+    assert!(
+        env.redfish_sim
+            .actions_since(&checkpoint)
+            .all_hosts()
+            .contains(&RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart
+            ))
+    );
+}
+
 /// A client-creation failure while setting the ingestion BIOS password is
 /// transient: the step must hold in place (not skip ahead to lockdown, which
 /// on an untested vendor would permanently ingest the host without a BIOS
